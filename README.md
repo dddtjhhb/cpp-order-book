@@ -1,6 +1,6 @@
-# C++ Limit Order Book Replay Engine
+# C++ Limit Order Book and Matching Engine
 
-A small, reproducible market-infrastructure project for learning how ordered market events update a limit order book. Version 0.2 supports `ADD`, `CANCEL`, `MODIFY`, and `EXECUTE` events, price-time priority within each level, partial fills, validation, and replay benchmarks.
+A small, reproducible market-infrastructure project for learning how ordered market events update a limit order book. Version 0.3 adds automatic limit-order matching and trade records to the FIFO order lifecycle implemented in v0.2.
 
 This is an educational systems project—not a production exchange gateway, trading strategy, alpha model, or implementation of CME iLink.
 
@@ -11,6 +11,7 @@ This is an educational systems project—not a production exchange gateway, trad
 3. Uses an order-ID index with stored queue positions so cancellations do not require scanning the book.
 4. Reports best bid, best ask, spread, rejected events, and replay throughput.
 5. Tests ordering, cancellation, modification, partial/full execution, validation, and CSV parsing behavior.
+6. Matches crossing limit orders at resting prices and emits auditable trade records.
 
 Prices are stored as integer ticks: `10025` represents `$100.25` when one tick is one cent. Integer prices avoid floating-point equality and ordering problems.
 
@@ -23,7 +24,10 @@ CSV events
 CSV reader -> Event -> OrderBook -> top of book / validation result
                             |
                             v
-                    throughput benchmark
+                    matching engine
+                     |          |
+                     v          v
+                trade records  benchmark
 ```
 
 The book uses:
@@ -33,6 +37,17 @@ The book uses:
 - `std::unordered_map<OrderId, StoredOrder>` for average-case constant-time lookup and direct queue removal.
 
 `std::map` prioritizes clarity and correctness. A production low-latency system would likely use specialized contiguous storage, custom allocators, and exchange-specific price bounds.
+
+## Matching behavior
+
+- A buy order matches while its limit price is greater than or equal to the best ask.
+- A sell order matches while its limit price is less than or equal to the best bid.
+- Better prices execute first; orders at the same price execute in FIFO order.
+- Trades use the resting order's price.
+- One incoming order may sweep multiple price levels.
+- Any unfilled remainder becomes a resting order at the back of its price-level queue.
+
+Each trade records a trade ID, incoming and resting order IDs, execution price, quantity, and timestamp.
 
 ## Build and test with CMake
 
@@ -94,16 +109,17 @@ The benchmark intentionally excludes CSV parsing to isolate order-book update co
 
 ## Current limitations
 
-- Events describe externally observed order lifecycle changes; the book does not yet match crossing orders itself.
-- No market orders, fees, exchange-specific modify rules, or strategy logic.
+- Only limit orders are matched; market orders and time-in-force instructions are not implemented.
+- Replay `MODIFY` events update resting state but do not yet emit trades when a modification becomes marketable.
+- No fees, exchange-specific protocol rules, persistence, networking, or strategy logic.
 - Events are processed on one thread to preserve deterministic order.
 - The synthetic benchmark is not representative of CME traffic.
 - This code has not been connected to CME iLink, exchange multicast feeds, FPGA hardware, or colocation infrastructure.
 
 ## Next engineering experiments
 
-1. Add a matching engine with multi-level fills and trade records.
-2. Profile CSV parsing separately from book updates and report latency percentiles.
+1. Profile parsing, book updates, and matching separately and report p50/p95/p99 latency.
+2. Add market-order and time-in-force semantics such as IOC.
 3. Compare the FIFO implementation with more cache-friendly storage.
 4. Test a bounded producer-consumer queue for parsing and replay, then retain it only if measured throughput justifies synchronization complexity.
-5. Export spread and order-flow metrics for downstream time-series change detection.
+5. Export trades, spread, and order-flow metrics for downstream analysis.
