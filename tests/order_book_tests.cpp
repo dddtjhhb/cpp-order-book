@@ -67,6 +67,44 @@ int main() {
     check(!lifecycle.modify(999, 10000, 1).accepted, "reject modify of unknown order");
     check(!lifecycle.execute(999, 1).accepted, "reject execution of unknown order");
 
+    lob::OrderBook matcher;
+    check(matcher.add(order(100, lob::Side::Sell, 10025, 5)).accepted, "seed best ask");
+    check(matcher.add(order(101, lob::Side::Sell, 10030, 8)).accepted, "seed second ask");
+    check(matcher.add(order(102, lob::Side::Sell, 10030, 4)).accepted, "seed FIFO ask");
+
+    const auto buy_sweep = matcher.submit(order(200, lob::Side::Buy, 10030, 10), 5000);
+    check(buy_sweep.accepted, "crossing buy accepted");
+    check(buy_sweep.message == "fully matched", "crossing buy fully matched");
+    check(buy_sweep.trades.size() == 2, "buy sweeps two resting orders");
+    check(buy_sweep.trades[0].resting_order_id == 100, "best price executes first");
+    check(buy_sweep.trades[0].price == 10025 && buy_sweep.trades[0].quantity == 5,
+          "first trade uses resting price and quantity");
+    check(buy_sweep.trades[1].resting_order_id == 101,
+          "FIFO order executes first at same price");
+    check(buy_sweep.trades[1].price == 10030 && buy_sweep.trades[1].quantity == 5,
+          "second trade partially fills resting order");
+    check(matcher.find_order(101)->quantity == 3, "resting ask retains partial quantity");
+    check(matcher.fifo_at(lob::Side::Sell, 10030) == std::vector<lob::OrderId>({101, 102}),
+          "partial execution preserves resting FIFO");
+
+    const auto non_crossing_buy = matcher.submit(order(201, lob::Side::Buy, 10020, 7), 5010);
+    check(non_crossing_buy.accepted && non_crossing_buy.trades.empty(),
+          "non-crossing buy becomes resting order");
+    check(non_crossing_buy.resting_quantity == 7, "report resting quantity");
+    check(matcher.top().best_bid == 10020, "resting buy updates best bid");
+
+    const auto sell_sweep = matcher.submit(order(300, lob::Side::Sell, 10015, 10), 5020);
+    check(sell_sweep.accepted, "crossing sell accepted");
+    check(sell_sweep.trades.size() == 1, "sell matches available best bid");
+    check(sell_sweep.trades[0].resting_order_id == 201, "sell matches resting buy");
+    check(sell_sweep.trades[0].price == 10020, "sell executes at resting price");
+    check(sell_sweep.resting_quantity == 3, "unfilled sell remainder rests");
+    check(matcher.find_order(300)->quantity == 3, "sell remainder stored in book");
+    check(matcher.top().best_bid == std::nullopt, "filled bid level removed");
+
+    const auto duplicate = matcher.submit(order(300, lob::Side::Sell, 10010, 1), 5030);
+    check(!duplicate.accepted, "reject duplicate incoming order id");
+
     std::istringstream csv(
         "timestamp_ns,event_type,order_id,side,price_ticks,quantity\n"
         "1,ADD,10,BUY,9990,7\n"

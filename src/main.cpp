@@ -28,16 +28,26 @@ int main(int argc, char** argv) {
         const auto events = lob::read_events_file(argv[1]);
         lob::OrderBook book;
         std::size_t rejected = 0;
+        std::size_t trade_count = 0;
+        lob::Quantity traded_quantity = 0;
 
         const auto start = std::chrono::steady_clock::now();
         for (const auto& event : events) {
-            if (!book.process(event).accepted) ++rejected;
+            if (event.type == lob::EventType::Add) {
+                const auto result = book.submit(event.order, event.timestamp_ns);
+                if (!result.accepted) ++rejected;
+                trade_count += result.trades.size();
+                for (const auto& trade : result.trades) traded_quantity += trade.quantity;
+            } else if (!book.process(event).accepted) {
+                ++rejected;
+            }
         }
         const auto elapsed = std::chrono::steady_clock::now() - start;
         const double seconds = std::chrono::duration<double>(elapsed).count();
         const auto top = book.top();
 
         std::cout << "events=" << events.size() << " rejected=" << rejected
+                  << " trades=" << trade_count << " traded_quantity=" << traded_quantity
                   << " active_orders=" << book.order_count() << '\n';
         std::cout << "best_bid=";
         print_price(top.best_bid);

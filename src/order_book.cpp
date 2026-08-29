@@ -1,13 +1,18 @@
 #include "order_book.hpp"
 
+#include <algorithm>
 #include <iterator>
+#include <utility>
 
 namespace lob {
 
 ProcessResult OrderBook::process(const Event& event) {
     switch (event.type) {
         case EventType::Add:
-            return add(event.order);
+        {
+            const auto result = submit(event.order, event.timestamp_ns);
+            return {result.accepted, result.message};
+        }
         case EventType::Cancel:
             return cancel(event.order.id);
         case EventType::Modify:
@@ -16,6 +21,54 @@ ProcessResult OrderBook::process(const Event& event) {
             return execute(event.order.id, event.order.quantity);
     }
     return {false, "unsupported event type"};
+}
+
+SubmitResult OrderBook::submit(Order incoming, std::uint64_t timestamp_ns) {
+    if (incoming.quantity == 0) {
+        return {false, "quantity must be positive", {}, 0};
+    }
+    if (incoming.price <= 0) {
+        return {false, "price must be positive", {}, 0};
+    }
+    if (orders_.find(incoming.id) != orders_.end()) {
+        return {false, "duplicate order id", {}, 0};
+    }
+
+    std::vector<Trade> trades;
+    while (incoming.quantity > 0) {
+        auto& opposite = incoming.side == Side::Buy ? asks_ : bids_;
+        if (opposite.empty()) break;
+
+        const auto best = incoming.side == Side::Buy ? opposite.begin() : std::prev(opposite.end());
+        const Price resting_price = best->first;
+        const bool prices_cross = incoming.side == Side::Buy
+            ? incoming.price >= resting_price
+            : incoming.price <= resting_price;
+        if (!prices_cross) break;
+
+        const OrderId resting_id = best->second.fifo.front();
+        const auto resting_found = orders_.find(resting_id);
+        const Quantity traded_quantity =
+            std::min(incoming.quantity, resting_found->second.order.quantity);
+
+        trades.push_back(Trade{next_trade_id_++, incoming.id, resting_id, resting_price,
+                               traded_quantity, timestamp_ns});
+        incoming.quantity -= traded_quantity;
+        const auto execution = execute(resting_id, traded_quantity);
+        if (!execution.accepted) {
+            return {false, "internal matching invariant violated", std::move(trades), 0};
+        }
+    }
+
+    const Quantity remainder = incoming.quantity;
+    if (remainder > 0) {
+        const auto add_result = add(incoming);
+        if (!add_result.accepted) return {false, add_result.message, std::move(trades), 0};
+    }
+
+    if (trades.empty()) return {true, "accepted as resting order", {}, remainder};
+    if (remainder == 0) return {true, "fully matched", std::move(trades), 0};
+    return {true, "partially matched; remainder resting", std::move(trades), remainder};
 }
 
 ProcessResult OrderBook::add(const Order& order) {

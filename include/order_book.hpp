@@ -1,6 +1,7 @@
 #pragma once
 
 #include "event.hpp"
+#include "trade.hpp"
 
 #include <cstddef>
 #include <list>
@@ -23,6 +24,13 @@ struct ProcessResult {
     std::string message;
 };
 
+struct SubmitResult {
+    bool accepted;
+    std::string message;
+    std::vector<Trade> trades;
+    Quantity resting_quantity;
+};
+
 class OrderBook {
 public:
     ProcessResult process(const Event& event);
@@ -30,6 +38,7 @@ public:
     ProcessResult cancel(OrderId id);
     ProcessResult modify(OrderId id, Price new_price, Quantity new_quantity);
     ProcessResult execute(OrderId id, Quantity executed_quantity);
+    SubmitResult submit(Order incoming, std::uint64_t timestamp_ns);
 
     [[nodiscard]] TopOfBook top() const;
     [[nodiscard]] std::optional<Order> find_order(OrderId id) const;
@@ -59,6 +68,7 @@ private:
     Levels bids_;
     Levels asks_;
     std::unordered_map<OrderId, StoredOrder> orders_;
+    TradeId next_trade_id_{1};
 };
 
 }  // namespace lob
