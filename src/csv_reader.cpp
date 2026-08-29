@@ -16,6 +16,8 @@ Side parse_side(const std::string& text) {
 EventType parse_type(const std::string& text) {
     if (text == "ADD") return EventType::Add;
     if (text == "CANCEL") return EventType::Cancel;
+    if (text == "MODIFY") return EventType::Modify;
+    if (text == "EXECUTE") return EventType::Execute;
     throw std::runtime_error("invalid event type: " + text);
 }
 
