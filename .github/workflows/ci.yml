@@ -1,0 +1,36 @@
+name: C++ CI
+
+on:
+  push:
+    branches:
+      - main
+      - feature/order-lifecycle-fifo
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Configure Release build
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 2
+
+      - name: Run tests
+        run: ctest --test-dir build --build-config Release --output-on-failure
+
+      - name: Replay sample events
+        run: ./build/order_book_replay data/sample_events.csv
+
+      - name: Run benchmark smoke test
+        run: ./build/order_book_benchmark 10000
