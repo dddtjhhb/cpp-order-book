@@ -1,6 +1,6 @@
 # C++ Limit Order Book and Matching Engine
 
-A small, reproducible market-infrastructure project for learning how ordered market events update a limit order book. Version 0.3 adds automatic limit-order matching and trade records to the FIFO order lifecycle implemented in v0.2.
+A small, reproducible market-infrastructure project for learning how ordered market events update a limit order book. Version 0.4 adds reproducible throughput and instrumented p50/p95/p99 latency measurements for lifecycle and matching workloads.
 
 This is an educational systems project—not a production exchange gateway, trading strategy, alpha model, or implementation of CME iLink.
 
@@ -58,7 +58,8 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build --output-on-failure
 ./build/order_book_replay data/sample_events.csv
-./build/order_book_benchmark 500000
+./build/order_book_benchmark 500000 lifecycle
+./build/order_book_benchmark 500000 matching
 ```
 
 ## Build directly with Clang or GCC
@@ -77,7 +78,8 @@ c++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Iinclude \
 
 ./build/order_book_tests
 ./build/order_book_replay data/sample_events.csv
-./build/order_book_benchmark 500000
+./build/order_book_benchmark 500000 lifecycle
+./build/order_book_benchmark 500000 matching
 ```
 
 ## CSV contract
@@ -95,9 +97,27 @@ For `CANCEL`, only `order_id` determines which stored order is removed. For `EXE
 
 ## Benchmark methodology
 
-The benchmark generates alternating add/cancel pairs in memory, processes them sequentially, and reports events per second. Build in Release mode before reporting results. Numbers depend on hardware, compiler, optimization flags, workload, and measurement scope, so results should always include that context.
+The benchmark supports two deterministic in-memory workloads:
 
-The benchmark intentionally excludes CSV parsing to isolate order-book update cost. The CLI measurement includes replay processing after parsing, but not file loading.
+- `lifecycle`: alternating ADD/CANCEL pairs across multiple price levels;
+- `matching`: a resting sell followed by a crossing buy, producing one trade per pair.
+
+It runs each workload twice on fresh books. The first pass measures batch throughput without a clock read around every event. The second, instrumented pass records per-event p50, p95, p99, and maximum latency. Keeping the passes separate prevents per-event timing overhead from contaminating the throughput number.
+
+Build in Release mode before reporting results. Latencies include the overhead and resolution limits of `std::chrono::steady_clock`, so they are useful for controlled comparisons on the same machine—not claims about exchange-grade production latency. Numbers depend on hardware, compiler, optimization flags, workload, system load, and measurement scope.
+
+The benchmark intentionally excludes event generation and CSV parsing from its timed passes to isolate order-book update and matching cost. The CLI measurement includes replay processing after parsing, but not file loading.
+
+### Example v0.4 results
+
+One local run on an Apple M4 MacBook Air with Apple Clang 17, Release `-O2`, and 1,000,000 events produced:
+
+| Workload | Throughput | p50 | p95 | p99 | Max |
+|---|---:|---:|---:|---:|---:|
+| lifecycle | 22.66M events/s | 42 ns | 42 ns | 42 ns | 22,959 ns |
+| matching | 19.92M events/s | 42 ns | 42 ns | 84 ns | 9,750 ns |
+
+These are example measurements, not universal performance guarantees. The repeated 42 ns values reflect timer granularity as well as program work; maximum latency is especially sensitive to operating-system scheduling and background activity.
 
 ## Priority rules
 
@@ -118,8 +138,8 @@ The benchmark intentionally excludes CSV parsing to isolate order-book update co
 
 ## Next engineering experiments
 
-1. Profile parsing, book updates, and matching separately and report p50/p95/p99 latency.
-2. Add market-order and time-in-force semantics such as IOC.
-3. Compare the FIFO implementation with more cache-friendly storage.
+1. Use a system profiler to identify allocation and container hot spots in each workload.
+2. Compare the FIFO implementation with more cache-friendly storage and retain changes only when benchmarks improve.
+3. Add market-order and time-in-force semantics such as IOC.
 4. Test a bounded producer-consumer queue for parsing and replay, then retain it only if measured throughput justifies synchronization complexity.
 5. Export trades, spread, and order-flow metrics for downstream analysis.
