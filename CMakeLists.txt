@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(order_book_replay VERSION 0.3.0 LANGUAGES CXX)
+project(order_book_replay VERSION 0.4.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -20,3 +20,5 @@ target_link_libraries(order_book_benchmark PRIVATE order_book)
 
 enable_testing()
 add_test(NAME order_book_tests COMMAND order_book_tests)
+add_test(NAME benchmark_lifecycle_smoke COMMAND order_book_benchmark 100 lifecycle)
+add_test(NAME benchmark_matching_smoke COMMAND order_book_benchmark 100 matching)
