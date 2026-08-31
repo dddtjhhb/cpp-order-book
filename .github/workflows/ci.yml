@@ -34,4 +34,9 @@ jobs:
         run: ./build/order_book_replay data/sample_events.csv
 
       - name: Run benchmark smoke test
-        run: ./build/order_book_benchmark 10000
+        run: |
+          ./build/order_book_benchmark 10000 lifecycle
+          ./build/order_book_benchmark 10000 matching
+
+      - name: Run regression-detector tests
+        run: python3 -m unittest tests/test_performance_regression.py

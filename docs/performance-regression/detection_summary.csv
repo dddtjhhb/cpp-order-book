@@ -1,0 +1,7 @@
+file,matching_percent,detector,false_alarms,detection_delay_batches
+telemetry_25.csv,25,CUSUM,0,
+telemetry_25.csv,25,EWMA,0,
+telemetry_50.csv,50,CUSUM,0,2
+telemetry_50.csv,50,EWMA,0,2
+telemetry_100.csv,100,CUSUM,0,4
+telemetry_100.csv,100,EWMA,0,4

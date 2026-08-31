@@ -1,6 +1,6 @@
 # C++ Limit Order Book and Matching Engine
 
-A small, reproducible market-infrastructure project for learning how ordered market events update a limit order book. Version 0.4 adds reproducible throughput and instrumented p50/p95/p99 latency measurements for lifecycle and matching workloads.
+A small, reproducible market-infrastructure project for learning how ordered market events update a limit order book. Version 0.5 adds batch telemetry and causal CUSUM/EWMA detection of controlled performance regressions.
 
 This is an educational systems project—not a production exchange gateway, trading strategy, alpha model, or implementation of CME iLink.
 
@@ -60,6 +60,8 @@ ctest --test-dir build --output-on-failure
 ./build/order_book_replay data/sample_events.csv
 ./build/order_book_benchmark 500000 lifecycle
 ./build/order_book_benchmark 500000 matching
+./build/order_book_telemetry performance_telemetry.csv 120 20000 60 50
+python3 analysis/performance_regression.py performance_telemetry.csv
 ```
 
 ## Build directly with Clang or GCC
@@ -75,11 +77,15 @@ c++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Iinclude \
 c++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Iinclude \
   src/order_book.cpp benchmarks/replay_benchmark.cpp \
   -o build/order_book_benchmark
+c++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Iinclude \
+  src/order_book.cpp benchmarks/performance_telemetry.cpp \
+  -o build/order_book_telemetry
 
 ./build/order_book_tests
 ./build/order_book_replay data/sample_events.csv
 ./build/order_book_benchmark 500000 lifecycle
 ./build/order_book_benchmark 500000 matching
+./build/order_book_telemetry performance_telemetry.csv 120 20000 60 50
 ```
 
 ## CSV contract
@@ -119,6 +125,45 @@ One local run on an Apple M4 MacBook Air with Apple Clang 17, Release `-O2`, and
 
 These are example measurements, not universal performance guarantees. The repeated 42 ns values reflect timer granularity as well as program work; maximum latency is especially sensitive to operating-system scheduling and background activity.
 
+## Performance-regression experiment
+
+The telemetry runner divides a deterministic event stream into time-ordered batches. The first half uses ADD/CANCEL lifecycle pairs. After a known change point, a configurable share of those pairs becomes a resting sell followed by a crossing buy, exercising the matching and trade-record path. Event generation and CSV parsing remain outside the timed region.
+
+Each batch records throughput, p50/p95/p99/max latency, rejected events, active orders, and active price levels. Ten unrecorded lifecycle batches warm the relevant code paths before calibration begins.
+
+```bash
+./build/order_book_telemetry results/telemetry_25.csv 120 20000 60 25
+./build/order_book_telemetry results/telemetry_50.csv 120 20000 60 50
+./build/order_book_telemetry results/telemetry_100.csv 120 20000 60 100
+
+python3 analysis/performance_regression.py \
+  results/telemetry_25.csv results/telemetry_50.csv results/telemetry_100.csv \
+  --output-dir results
+```
+
+The Python analysis calibrates both detectors from the first 30 baseline batches:
+
+- lower-sided CUSUM accumulates standardized throughput drops and alarms when cumulative evidence exceeds a fixed threshold;
+- lower-sided EWMA gives recent batches more weight and alarms when its smoothed value crosses a fixed control limit.
+
+Neither detector reads the known change point or any future observation. The change point is used only after detection to count false alarms and calculate detection delay. The thresholds are intentionally conservative defaults for this controlled experiment, not universally tuned production settings.
+
+This experiment asks whether a sustained execution-path shift can be detected above ordinary measurement noise. It does not diagnose the root cause, prove that matching is always slower, or represent production exchange traffic.
+
+### Example v0.5 detection results
+
+One local Apple M4 run with 120 batches, 20,000 events per batch, and a change at batch 60 produced:
+
+| Post-change matching share | Mean throughput change | CUSUM false alarms / delay | EWMA false alarms / delay |
+|---:|---:|---:|---:|
+| 25% | +4.1% | 0 / not detected | 0 / not detected |
+| 50% | -9.3% | 0 / 2 batches | 0 / 2 batches |
+| 100% | -14.5% | 0 / 4 batches | 0 / 4 batches |
+
+![Throughput time series with the controlled shift and detector alarms](docs/performance-regression/telemetry_50.svg)
+
+The 25% workload shift was not a measurable slowdown in this run, so neither detector raised an alarm. The non-monotonic detection delays and the apparent 25% speedup are evidence that a single process run is noisy; repeated runs and uncertainty estimates are required before drawing a general performance conclusion.
+
 ## Priority rules
 
 - New orders join the back of their price level's FIFO queue.
@@ -138,8 +183,8 @@ These are example measurements, not universal performance guarantees. The repeat
 
 ## Next engineering experiments
 
-1. Use a system profiler to identify allocation and container hot spots in each workload.
-2. Compare the FIFO implementation with more cache-friendly storage and retain changes only when benchmarks improve.
-3. Add market-order and time-in-force semantics such as IOC.
-4. Test a bounded producer-consumer queue for parsing and replay, then retain it only if measured throughput justifies synchronization complexity.
-5. Export trades, spread, and order-flow metrics for downstream analysis.
+1. Repeat each regression scenario across processes and report uncertainty across runs.
+2. Use a system profiler to identify allocation and container hot spots after an alarm.
+3. Compare the FIFO implementation with more cache-friendly storage and retain changes only when benchmarks improve.
+4. Add market-order and time-in-force semantics such as IOC.
+5. Test networked replay while separating transport, parsing, and book-processing cost.
