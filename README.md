@@ -1,6 +1,6 @@
 # C++ Limit Order Book and Matching Engine
 
-A small, reproducible market-infrastructure project for learning how ordered market events update a limit order book. Version 0.5 adds batch telemetry and causal CUSUM/EWMA detection of controlled performance regressions.
+A small, reproducible market-infrastructure project for learning how ordered market events update a limit order book. Version 0.6 adds stateful property fuzzing, invariant validation, failure minimization, and a controlled mutation-testing experiment.
 
 This is an educational systems project—not a production exchange gateway, trading strategy, alpha model, or implementation of CME iLink.
 
@@ -61,7 +61,9 @@ ctest --test-dir build --output-on-failure
 ./build/order_book_benchmark 500000 lifecycle
 ./build/order_book_benchmark 500000 matching
 ./build/order_book_telemetry performance_telemetry.csv 120 20000 60 50
+./build/order_book_property_fuzz 1 10000 fuzz_failure.txt
 python3 analysis/performance_regression.py performance_telemetry.csv
+python3 analysis/mutation_experiment.py
 ```
 
 ## Build directly with Clang or GCC
@@ -80,6 +82,9 @@ c++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Iinclude \
 c++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Iinclude \
   src/order_book.cpp benchmarks/performance_telemetry.cpp \
   -o build/order_book_telemetry
+c++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Iinclude \
+  src/order_book.cpp tests/order_book_property_fuzz.cpp \
+  -o build/order_book_property_fuzz
 
 ./build/order_book_tests
 ./build/order_book_replay data/sample_events.csv
@@ -164,6 +169,42 @@ One local Apple M4 run with 120 batches, 20,000 events per batch, and a change a
 
 The 25% workload shift was not a measurable slowdown in this run, so neither detector raised an alarm. The non-monotonic detection delays and the apparent 25% speedup are evidence that a single process run is noisy; repeated runs and uncertainty estimates are required before drawing a general performance conclusion.
 
+## Property-based testing and fuzzing
+
+**Research question:** can stateful invariant checking detect interaction bugs that the existing example-based unit tests miss?
+
+The stateful property fuzzer generates reproducible sequences of submit, cancel, modify, and execute operations from a fixed seed. After every operation it audits properties that are broader than individual examples:
+
+- every indexed order appears exactly once in a FIFO queue;
+- each stored iterator, side, and price agrees with its price level;
+- each level's aggregate quantity equals the sum of its resting orders;
+- empty levels and zero-quantity resting orders cannot remain;
+- automatic matching cannot leave a crossed resting book;
+- submitted quantity equals traded quantity plus resting quantity;
+- the first trade respects best-price and FIFO priority;
+- same-price quantity reductions preserve priority, while increases or price changes move an order to the FIFO back.
+
+```bash
+./build/order_book_property_fuzz 1 10000 fuzz_failure.txt
+./build/order_book_property_fuzz 42 10000 fuzz_failure.txt
+```
+
+The seed makes a generated run reproducible. If a property fails, the runner removes chunks of operations while preserving the failure and writes the reduced sequence, seed, failing step, and reason to the requested file. This is deterministic model-based random testing rather than coverage-guided fuzzing such as libFuzzer or AFL++.
+
+### Mutation experiment
+
+`analysis/mutation_experiment.py` creates temporary source copies, injects five controlled faults, and runs both the original unit suite and five fixed-seed property-fuzz runs. Mutated source files are deleted with the temporary directory and never replace production code.
+
+| Controlled mutant | Unit tests | Property fuzzer |
+|---|---|---|
+| Skip level-total update during execution | Survived | Killed |
+| Skip level-total update during cancellation | Survived | Killed |
+| Reset FIFO priority for an equal-quantity modification | Survived | Killed |
+| Require strict inequality for a crossing buy | Killed | Killed |
+| Require strict inequality for a crossing sell | Survived | Killed |
+
+For this deliberately selected mutant set, unit tests killed 1/5 and the property fuzzer killed 5/5. This does not establish a general detection rate: the mutants are few, hand-written, and related to the encoded properties. It demonstrates that invariant-driven random sequences cover interactions absent from the current example-based tests.
+
 ## Priority rules
 
 - New orders join the back of their price level's FIFO queue.
@@ -183,8 +224,8 @@ The 25% workload shift was not a measurable slowdown in this run, so neither det
 
 ## Next engineering experiments
 
-1. Repeat each regression scenario across processes and report uncertainty across runs.
-2. Use a system profiler to identify allocation and container hot spots after an alarm.
-3. Compare the FIFO implementation with more cache-friendly storage and retain changes only when benchmarks improve.
-4. Add market-order and time-in-force semantics such as IOC.
+1. Add coverage-guided fuzzing and compare reached branches with the fixed-seed generator.
+2. Expand mutation operators and repeat the comparison on an independently chosen mutant set.
+3. Repeat each regression scenario across processes and report uncertainty across runs.
+4. Use a system profiler to identify allocation and container hot spots after an alarm.
 5. Test networked replay while separating transport, parsing, and book-processing cost.

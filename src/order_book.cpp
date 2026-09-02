@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <iterator>
+#include <unordered_set>
 #include <utility>
 
 namespace lob {
@@ -184,6 +185,47 @@ TopOfBook OrderBook::top() const {
         result.spread = *result.best_ask - *result.best_bid;
     }
     return result;
+}
+
+std::optional<std::string> OrderBook::validate_invariants() const {
+    std::unordered_set<OrderId> queued_ids;
+    std::size_t queued_orders = 0;
+
+    const auto validate_levels = [&](const Levels& levels, Side expected_side)
+        -> std::optional<std::string> {
+        for (const auto& [price, level] : levels) {
+            if (level.fifo.empty()) return "empty price level";
+            Quantity computed_total = 0;
+            for (const OrderId id : level.fifo) {
+                ++queued_orders;
+                if (!queued_ids.insert(id).second) return "order appears in multiple FIFO positions";
+                const auto found = orders_.find(id);
+                if (found == orders_.end()) return "FIFO references missing order";
+                const auto& stored = found->second;
+                if (stored.order.side != expected_side) return "order side disagrees with price level";
+                if (stored.order.price != price) return "order price disagrees with price level";
+                if (stored.order.quantity == 0) return "resting order has zero quantity";
+                if (stored.position == level.fifo.end() || *stored.position != id) {
+                    return "order index stores invalid FIFO iterator";
+                }
+                computed_total += stored.order.quantity;
+            }
+            if (computed_total != level.total_quantity) return "price-level quantity mismatch";
+        }
+        return std::nullopt;
+    };
+
+    if (const auto error = validate_levels(bids_, Side::Buy)) return error;
+    if (const auto error = validate_levels(asks_, Side::Sell)) return error;
+    if (queued_orders != orders_.size()) return "order index and FIFO counts disagree";
+    for (const auto& [id, stored] : orders_) {
+        if (queued_ids.find(id) == queued_ids.end()) return "indexed order is absent from FIFO";
+        if (stored.order.id != id) return "order index key disagrees with stored ID";
+    }
+    if (!bids_.empty() && !asks_.empty() && bids_.rbegin()->first >= asks_.begin()->first) {
+        return "crossed resting book";
+    }
+    return std::nullopt;
 }
 
 }  // namespace lob
