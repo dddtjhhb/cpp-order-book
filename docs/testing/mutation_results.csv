@@ -1,0 +1,6 @@
+mutant,unit_tests,property_fuzzer
+skip_total_update_on_execute,SURVIVED,KILLED
+skip_total_update_on_cancel,SURVIVED,KILLED
+reset_priority_on_equal_quantity,SURVIVED,KILLED
+strict_buy_crossing,KILLED,KILLED
+strict_sell_crossing,SURVIVED,KILLED
