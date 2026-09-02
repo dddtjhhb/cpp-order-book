@@ -46,6 +46,7 @@ public:
     [[nodiscard]] std::size_t order_count() const { return orders_.size(); }
     [[nodiscard]] std::size_t bid_level_count() const { return bids_.size(); }
     [[nodiscard]] std::size_t ask_level_count() const { return asks_.size(); }
+    [[nodiscard]] std::optional<std::string> validate_invariants() const;
 
 private:
     struct PriceLevel {
