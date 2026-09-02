@@ -3,3 +3,4 @@ results/
 *.pyc
 __pycache__/
 performance_telemetry.csv
+fuzz_failure*.txt
