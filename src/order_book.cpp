@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <iterator>
+#include <limits>
+#include <stdexcept>
 #include <unordered_set>
 #include <utility>
 
@@ -18,43 +20,66 @@ const char* to_string(ResultCode code) {
             return "EXECUTION_QUANTITY_EXCEEDS_REMAINING";
         case ResultCode::UnsupportedEventType: return "UNSUPPORTED_EVENT_TYPE";
         case ResultCode::InternalInvariantViolation: return "INTERNAL_INVARIANT_VIOLATION";
+        case ResultCode::InvalidSide: return "INVALID_SIDE";
+        case ResultCode::UnknownSymbol: return "UNKNOWN_SYMBOL";
+        case ResultCode::QuantityOverflow: return "QUANTITY_OVERFLOW";
     }
     return "UNKNOWN_RESULT_CODE";
 }
 
+EngineResult OrderBook::result(ResultCode reason, std::string message,
+                               std::vector<Trade> trades, Quantity resting) const {
+    return {reason == ResultCode::Accepted, reason, std::move(message),
+            std::move(trades), resting, 0, symbol_id_};
+}
+
 EngineResult OrderBook::process(const Event& event) {
-    EngineResult result{};
-    switch (event.type) {
-        case EventType::Add:
-            result = submit(event.order, event.timestamp_ns);
-            break;
-        case EventType::Cancel:
-            result = cancel(event.order.id);
-            break;
-        case EventType::Modify:
-            result = modify(event.order.id, event.order.price, event.order.quantity,
-                            event.timestamp_ns);
-            break;
-        case EventType::Execute:
-            result = execute(event.order.id, event.order.quantity);
-            break;
-        default:
-            result = {false, ResultCode::UnsupportedEventType, "unsupported event type", {}, 0};
-            break;
-    }
-    result.sequence = event.sequence;
-    return result;
+    auto output = [&]() -> EngineResult {
+        if (event.symbol_id != symbol_id_) {
+            return result(ResultCode::UnknownSymbol, "unknown symbol");
+        }
+        switch (event.type) {
+            case EventType::Add:
+                return submit(event.order, event.timestamp_ns);
+            case EventType::Cancel:
+                return cancel(event.order.id);
+            case EventType::Modify:
+                return modify(event.order.id, event.order.price, event.order.quantity,
+                              event.timestamp_ns);
+            case EventType::Execute:
+                return execute(event.order.id, event.order.quantity);
+        }
+        return result(ResultCode::UnsupportedEventType, "unsupported event type");
+    }();
+    output.symbol_id = event.symbol_id;
+    output.sequence = event.sequence;
+    return output;
+}
+
+bool OrderBook::would_overflow(const Order& incoming, Quantity removed) const {
+    const auto& levels = levels_for(incoming.side);
+    const auto found = levels.find(incoming.price);
+    const Quantity current = found == levels.end() ? 0 : found->second.total_quantity;
+    return incoming.quantity > std::numeric_limits<Quantity>::max() - (current - removed);
 }
 
 EngineResult OrderBook::submit(Order incoming, std::uint64_t timestamp_ns) {
+    if (incoming.side != Side::Buy && incoming.side != Side::Sell) {
+        return result(ResultCode::InvalidSide, "invalid side");
+    }
     if (incoming.quantity == 0) {
-        return {false, ResultCode::InvalidQuantity, "quantity must be positive", {}, 0};
+        return result(ResultCode::InvalidQuantity, "quantity must be positive");
     }
     if (incoming.price <= 0) {
-        return {false, ResultCode::InvalidPrice, "price must be positive", {}, 0};
+        return result(ResultCode::InvalidPrice, "price must be positive");
     }
     if (orders_.find(incoming.id) != orders_.end()) {
-        return {false, ResultCode::DuplicateOrderId, "duplicate order id", {}, 0};
+        return result(ResultCode::DuplicateOrderId, "duplicate order id");
+    }
+    // An existing same-side level cannot cross the opposite book. Thus this
+    // check can reject overflow before any fills mutate state.
+    if (would_overflow(incoming)) {
+        return result(ResultCode::QuantityOverflow, "price-level quantity would overflow");
     }
 
     std::vector<Trade> trades;
@@ -79,105 +104,66 @@ EngineResult OrderBook::submit(Order incoming, std::uint64_t timestamp_ns) {
         incoming.quantity -= traded_quantity;
         const auto execution = execute(resting_id, traded_quantity);
         if (!execution.accepted) {
-            return {false, ResultCode::InternalInvariantViolation,
-                    "internal matching invariant violated", std::move(trades), 0};
+            throw std::logic_error("internal matching invariant violated");
         }
     }
 
     const Quantity remainder = incoming.quantity;
-    if (remainder > 0) {
-        const auto add_result = add(incoming);
-        if (!add_result.accepted) {
-            return {false, add_result.code, add_result.message, std::move(trades), 0};
-        }
-    }
+    if (remainder > 0) add_resting(incoming);
 
-    if (trades.empty()) {
-        return {true, ResultCode::Accepted, "accepted as resting order", {}, remainder};
-    }
-    if (remainder == 0) {
-        return {true, ResultCode::Accepted, "fully matched", std::move(trades), 0};
-    }
-    return {true, ResultCode::Accepted, "partially matched; remainder resting",
-            std::move(trades), remainder};
+    if (trades.empty()) return result(ResultCode::Accepted, "accepted as resting order", {}, remainder);
+    if (remainder == 0) return result(ResultCode::Accepted, "fully matched", std::move(trades));
+    return result(ResultCode::Accepted, "partially matched; remainder resting", std::move(trades), remainder);
 }
 
-EngineResult OrderBook::add(const Order& order) {
-    if (order.quantity == 0) {
-        return {false, ResultCode::InvalidQuantity, "quantity must be positive", {}, 0};
-    }
-    if (order.price <= 0) {
-        return {false, ResultCode::InvalidPrice, "price must be positive", {}, 0};
-    }
-    if (orders_.find(order.id) != orders_.end()) {
-        return {false, ResultCode::DuplicateOrderId, "duplicate order id", {}, 0};
-    }
-
+void OrderBook::add_resting(const Order& order) {
     auto& level = levels_for(order.side)[order.price];
     level.total_quantity += order.quantity;
     level.fifo.push_back(order.id);
     orders_.emplace(order.id, StoredOrder{order, std::prev(level.fifo.end())});
-    return {true, ResultCode::Accepted, "added", {}, order.quantity};
 }
 
 EngineResult OrderBook::cancel(OrderId id) {
     const auto found = orders_.find(id);
     if (found == orders_.end()) {
-        return {false, ResultCode::UnknownOrderId, "unknown order id", {}, 0};
+        return result(ResultCode::UnknownOrderId, "unknown order id");
     }
 
     erase_order(found);
-    return {true, ResultCode::Accepted, "cancelled", {}, 0};
+    return result(ResultCode::Accepted, "cancelled");
 }
 
 EngineResult OrderBook::modify(OrderId id, Price new_price, Quantity new_quantity,
                                std::uint64_t timestamp_ns) {
     auto found = orders_.find(id);
-    if (found == orders_.end()) {
-        return {false, ResultCode::UnknownOrderId, "unknown order id", {}, 0};
-    }
-    if (new_price <= 0) {
-        return {false, ResultCode::InvalidPrice, "price must be positive", {}, 0};
-    }
-    if (new_quantity == 0) {
-        return {false, ResultCode::InvalidQuantity, "quantity must be positive", {}, 0};
-    }
+    if (found == orders_.end()) return result(ResultCode::UnknownOrderId, "unknown order id");
+    if (new_price <= 0) return result(ResultCode::InvalidPrice, "price must be positive");
+    if (new_quantity == 0) return result(ResultCode::InvalidQuantity, "quantity must be positive");
 
     const Order old = found->second.order;
+    const Order replacement{id, old.side, new_price, new_quantity};
+    if (would_overflow(replacement, new_price == old.price ? old.quantity : 0)) {
+        return result(ResultCode::QuantityOverflow, "price-level quantity would overflow");
+    }
     if (new_price == old.price && new_quantity <= old.quantity) {
         auto& level = levels_for(old.side).at(old.price);
         level.total_quantity -= old.quantity - new_quantity;
         found->second.order.quantity = new_quantity;
-        return {true, ResultCode::Accepted, "modified in place; priority preserved", {},
-                new_quantity};
+        return result(ResultCode::Accepted, "modified in place; priority preserved", {}, new_quantity);
     }
 
+    // All business validation precedes removal: a rejected replacement leaves
+    // the original quantity, price and FIFO priority unchanged.
     erase_order(found);
-    auto result = submit(Order{id, old.side, new_price, new_quantity}, timestamp_ns);
-    if (!result.accepted) return result;
-    if (result.trades.empty()) {
-        result.message = "modified; priority reset";
-    } else if (result.resting_quantity == 0) {
-        result.message = "modified; fully matched";
-    } else {
-        result.message = "modified; partially matched; remainder resting";
-    }
-    return result;
+    return submit(replacement, timestamp_ns);
 }
 
 EngineResult OrderBook::execute(OrderId id, Quantity executed_quantity) {
     auto found = orders_.find(id);
-    if (found == orders_.end()) {
-        return {false, ResultCode::UnknownOrderId, "unknown order id", {}, 0};
-    }
-    if (executed_quantity == 0) {
-        return {false, ResultCode::InvalidQuantity,
-                "executed quantity must be positive", {}, found->second.order.quantity};
-    }
+    if (found == orders_.end()) return result(ResultCode::UnknownOrderId, "unknown order id");
+    if (executed_quantity == 0) return result(ResultCode::InvalidQuantity, "executed quantity must be positive");
     if (executed_quantity > found->second.order.quantity) {
-        return {false, ResultCode::ExecutionQuantityExceedsRemaining,
-                "executed quantity exceeds remaining order quantity", {},
-                found->second.order.quantity};
+        return result(ResultCode::ExecutionQuantityExceedsRemaining, "executed quantity exceeds remaining order quantity");
     }
 
     auto& stored = found->second;
@@ -190,9 +176,9 @@ EngineResult OrderBook::execute(OrderId id, Quantity executed_quantity) {
         level.fifo.erase(stored.position);
         if (level.fifo.empty()) levels.erase(level_it);
         orders_.erase(found);
-        return {true, ResultCode::Accepted, "fully executed", {}, 0};
+        return result(ResultCode::Accepted, "fully executed");
     }
-    return {true, ResultCode::Accepted, "partially executed", {}, stored.order.quantity};
+    return result(ResultCode::Accepted, "partially executed", {}, stored.order.quantity);
 }
 
 std::optional<Order> OrderBook::find_order(OrderId id) const {
@@ -260,6 +246,9 @@ std::optional<std::string> OrderBook::validate_invariants() const {
                 if (stored.order.quantity == 0) return "resting order has zero quantity";
                 if (stored.position == level.fifo.end() || *stored.position != id) {
                     return "order index stores invalid FIFO iterator";
+                }
+                if (stored.order.quantity > std::numeric_limits<Quantity>::max() - computed_total) {
+                    return "price-level quantity overflow";
                 }
                 computed_total += stored.order.quantity;
             }

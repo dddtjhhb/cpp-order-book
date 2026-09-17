@@ -51,3 +51,11 @@ jobs:
             src/order_book.cpp tests/order_book_property_fuzz.cpp \
             -o build/order_book_property_fuzz_sanitized
           ./build/order_book_property_fuzz_sanitized 20260831 5000 build/fuzz_failure_sanitized.txt
+
+      - name: Run engine contract tests with sanitizers
+        run: |
+          c++ -std=c++17 -O1 -g -fsanitize=address,undefined \
+            -fno-omit-frame-pointer -Wall -Wextra -Wpedantic -Iinclude \
+            src/order_book.cpp src/csv_reader.cpp tests/engine_contract_tests.cpp \
+            -o build/engine_contract_tests_sanitized
+          ./build/engine_contract_tests_sanitized
