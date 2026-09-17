@@ -104,10 +104,39 @@ std::optional<Failure> replay(const std::vector<Operation>& operations) {
         } else {
             std::vector<lob::OrderId> before_fifo;
             if (existing) before_fifo = book.fifo_at(existing->side, existing->price);
-            const auto result = book.modify(operation.id, operation.price, operation.quantity);
+            const auto before = book.top();
+            std::optional<lob::OrderId> expected_first_resting;
+            if (existing && operation.price != existing->price) {
+                if (existing->side == lob::Side::Buy && before.best_ask &&
+                    operation.price >= *before.best_ask) {
+                    const auto fifo = book.fifo_at(lob::Side::Sell, *before.best_ask);
+                    if (!fifo.empty()) expected_first_resting = fifo.front();
+                } else if (existing->side == lob::Side::Sell && before.best_bid &&
+                           operation.price <= *before.best_bid) {
+                    const auto fifo = book.fifo_at(lob::Side::Buy, *before.best_bid);
+                    if (!fifo.empty()) expected_first_resting = fifo.front();
+                }
+            }
+            const auto result = book.modify(
+                operation.id, operation.price, operation.quantity, step + 1);
             const bool should_accept = existing && operation.price > 0 && operation.quantity > 0;
             if (result.accepted != should_accept) {
                 return Failure{step, "modify validation disagrees with model"};
+            }
+            if (result.accepted) {
+                lob::Quantity traded = 0;
+                for (const auto& trade : result.trades) {
+                    if (trade.quantity == 0) return Failure{step, "zero-quantity replace trade"};
+                    traded += trade.quantity;
+                }
+                if (traded + result.resting_quantity != operation.quantity) {
+                    return Failure{step, "replace quantity was not conserved"};
+                }
+                if (expected_first_resting &&
+                    (result.trades.empty() ||
+                     result.trades.front().resting_order_id != *expected_first_resting)) {
+                    return Failure{step, "replace trade violated price-time priority"};
+                }
             }
             if (result.accepted && operation.price == existing->price &&
                 operation.quantity <= existing->quantity &&
@@ -116,9 +145,14 @@ std::optional<Failure> replay(const std::vector<Operation>& operations) {
             }
             if (result.accepted && (operation.price != existing->price ||
                                     operation.quantity > existing->quantity)) {
-                const auto after_fifo = book.fifo_at(existing->side, operation.price);
-                if (after_fifo.empty() || after_fifo.back() != operation.id) {
-                    return Failure{step, "priority-resetting modify did not move order to FIFO back"};
+                if (result.resting_quantity > 0) {
+                    const auto after_fifo = book.fifo_at(existing->side, operation.price);
+                    if (after_fifo.empty() || after_fifo.back() != operation.id) {
+                        return Failure{
+                            step, "priority-resetting modify did not move remainder to FIFO back"};
+                    }
+                } else if (book.find_order(operation.id)) {
+                    return Failure{step, "fully matched replacement remained in book"};
                 }
             }
         }
@@ -178,13 +212,7 @@ Operation generate_operation(std::mt19937_64& random, lob::OrderBook& model_book
         return operation;
     }
     if (choice < 85) {
-        lob::Price new_price = 9980 + static_cast<lob::Price>(random() % 41);
-        const auto top = model_book.top();
-        if (stored.side == lob::Side::Buy && top.best_ask) {
-            new_price = std::min(new_price, *top.best_ask - 1);
-        } else if (stored.side == lob::Side::Sell && top.best_bid) {
-            new_price = std::max(new_price, *top.best_bid + 1);
-        }
+        const lob::Price new_price = 9980 + static_cast<lob::Price>(random() % 41);
         const lob::Quantity new_quantity = random() % 4 == 0
             ? stored.quantity
             : 1 + random() % 120;

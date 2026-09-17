@@ -7,32 +7,54 @@
 
 namespace lob {
 
-ProcessResult OrderBook::process(const Event& event) {
-    switch (event.type) {
-        case EventType::Add:
-        {
-            const auto result = submit(event.order, event.timestamp_ns);
-            return {result.accepted, result.message};
-        }
-        case EventType::Cancel:
-            return cancel(event.order.id);
-        case EventType::Modify:
-            return modify(event.order.id, event.order.price, event.order.quantity);
-        case EventType::Execute:
-            return execute(event.order.id, event.order.quantity);
+const char* to_string(ResultCode code) {
+    switch (code) {
+        case ResultCode::Accepted: return "ACCEPTED";
+        case ResultCode::InvalidQuantity: return "INVALID_QUANTITY";
+        case ResultCode::InvalidPrice: return "INVALID_PRICE";
+        case ResultCode::DuplicateOrderId: return "DUPLICATE_ORDER_ID";
+        case ResultCode::UnknownOrderId: return "UNKNOWN_ORDER_ID";
+        case ResultCode::ExecutionQuantityExceedsRemaining:
+            return "EXECUTION_QUANTITY_EXCEEDS_REMAINING";
+        case ResultCode::UnsupportedEventType: return "UNSUPPORTED_EVENT_TYPE";
+        case ResultCode::InternalInvariantViolation: return "INTERNAL_INVARIANT_VIOLATION";
     }
-    return {false, "unsupported event type"};
+    return "UNKNOWN_RESULT_CODE";
 }
 
-SubmitResult OrderBook::submit(Order incoming, std::uint64_t timestamp_ns) {
+EngineResult OrderBook::process(const Event& event) {
+    EngineResult result{};
+    switch (event.type) {
+        case EventType::Add:
+            result = submit(event.order, event.timestamp_ns);
+            break;
+        case EventType::Cancel:
+            result = cancel(event.order.id);
+            break;
+        case EventType::Modify:
+            result = modify(event.order.id, event.order.price, event.order.quantity,
+                            event.timestamp_ns);
+            break;
+        case EventType::Execute:
+            result = execute(event.order.id, event.order.quantity);
+            break;
+        default:
+            result = {false, ResultCode::UnsupportedEventType, "unsupported event type", {}, 0};
+            break;
+    }
+    result.sequence = event.sequence;
+    return result;
+}
+
+EngineResult OrderBook::submit(Order incoming, std::uint64_t timestamp_ns) {
     if (incoming.quantity == 0) {
-        return {false, "quantity must be positive", {}, 0};
+        return {false, ResultCode::InvalidQuantity, "quantity must be positive", {}, 0};
     }
     if (incoming.price <= 0) {
-        return {false, "price must be positive", {}, 0};
+        return {false, ResultCode::InvalidPrice, "price must be positive", {}, 0};
     }
     if (orders_.find(incoming.id) != orders_.end()) {
-        return {false, "duplicate order id", {}, 0};
+        return {false, ResultCode::DuplicateOrderId, "duplicate order id", {}, 0};
     }
 
     std::vector<Trade> trades;
@@ -57,74 +79,105 @@ SubmitResult OrderBook::submit(Order incoming, std::uint64_t timestamp_ns) {
         incoming.quantity -= traded_quantity;
         const auto execution = execute(resting_id, traded_quantity);
         if (!execution.accepted) {
-            return {false, "internal matching invariant violated", std::move(trades), 0};
+            return {false, ResultCode::InternalInvariantViolation,
+                    "internal matching invariant violated", std::move(trades), 0};
         }
     }
 
     const Quantity remainder = incoming.quantity;
     if (remainder > 0) {
         const auto add_result = add(incoming);
-        if (!add_result.accepted) return {false, add_result.message, std::move(trades), 0};
+        if (!add_result.accepted) {
+            return {false, add_result.code, add_result.message, std::move(trades), 0};
+        }
     }
 
-    if (trades.empty()) return {true, "accepted as resting order", {}, remainder};
-    if (remainder == 0) return {true, "fully matched", std::move(trades), 0};
-    return {true, "partially matched; remainder resting", std::move(trades), remainder};
+    if (trades.empty()) {
+        return {true, ResultCode::Accepted, "accepted as resting order", {}, remainder};
+    }
+    if (remainder == 0) {
+        return {true, ResultCode::Accepted, "fully matched", std::move(trades), 0};
+    }
+    return {true, ResultCode::Accepted, "partially matched; remainder resting",
+            std::move(trades), remainder};
 }
 
-ProcessResult OrderBook::add(const Order& order) {
+EngineResult OrderBook::add(const Order& order) {
     if (order.quantity == 0) {
-        return {false, "quantity must be positive"};
+        return {false, ResultCode::InvalidQuantity, "quantity must be positive", {}, 0};
     }
     if (order.price <= 0) {
-        return {false, "price must be positive"};
+        return {false, ResultCode::InvalidPrice, "price must be positive", {}, 0};
     }
     if (orders_.find(order.id) != orders_.end()) {
-        return {false, "duplicate order id"};
+        return {false, ResultCode::DuplicateOrderId, "duplicate order id", {}, 0};
     }
 
     auto& level = levels_for(order.side)[order.price];
     level.total_quantity += order.quantity;
     level.fifo.push_back(order.id);
     orders_.emplace(order.id, StoredOrder{order, std::prev(level.fifo.end())});
-    return {true, "added"};
+    return {true, ResultCode::Accepted, "added", {}, order.quantity};
 }
 
-ProcessResult OrderBook::cancel(OrderId id) {
+EngineResult OrderBook::cancel(OrderId id) {
     const auto found = orders_.find(id);
     if (found == orders_.end()) {
-        return {false, "unknown order id"};
+        return {false, ResultCode::UnknownOrderId, "unknown order id", {}, 0};
     }
 
     erase_order(found);
-    return {true, "cancelled"};
+    return {true, ResultCode::Accepted, "cancelled", {}, 0};
 }
 
-ProcessResult OrderBook::modify(OrderId id, Price new_price, Quantity new_quantity) {
+EngineResult OrderBook::modify(OrderId id, Price new_price, Quantity new_quantity,
+                               std::uint64_t timestamp_ns) {
     auto found = orders_.find(id);
-    if (found == orders_.end()) return {false, "unknown order id"};
-    if (new_price <= 0) return {false, "price must be positive"};
-    if (new_quantity == 0) return {false, "quantity must be positive"};
+    if (found == orders_.end()) {
+        return {false, ResultCode::UnknownOrderId, "unknown order id", {}, 0};
+    }
+    if (new_price <= 0) {
+        return {false, ResultCode::InvalidPrice, "price must be positive", {}, 0};
+    }
+    if (new_quantity == 0) {
+        return {false, ResultCode::InvalidQuantity, "quantity must be positive", {}, 0};
+    }
 
     const Order old = found->second.order;
     if (new_price == old.price && new_quantity <= old.quantity) {
         auto& level = levels_for(old.side).at(old.price);
         level.total_quantity -= old.quantity - new_quantity;
         found->second.order.quantity = new_quantity;
-        return {true, "modified in place; priority preserved"};
+        return {true, ResultCode::Accepted, "modified in place; priority preserved", {},
+                new_quantity};
     }
 
     erase_order(found);
-    const auto result = add(Order{id, old.side, new_price, new_quantity});
-    return result.accepted ? ProcessResult{true, "modified; priority reset"} : result;
+    auto result = submit(Order{id, old.side, new_price, new_quantity}, timestamp_ns);
+    if (!result.accepted) return result;
+    if (result.trades.empty()) {
+        result.message = "modified; priority reset";
+    } else if (result.resting_quantity == 0) {
+        result.message = "modified; fully matched";
+    } else {
+        result.message = "modified; partially matched; remainder resting";
+    }
+    return result;
 }
 
-ProcessResult OrderBook::execute(OrderId id, Quantity executed_quantity) {
+EngineResult OrderBook::execute(OrderId id, Quantity executed_quantity) {
     auto found = orders_.find(id);
-    if (found == orders_.end()) return {false, "unknown order id"};
-    if (executed_quantity == 0) return {false, "executed quantity must be positive"};
+    if (found == orders_.end()) {
+        return {false, ResultCode::UnknownOrderId, "unknown order id", {}, 0};
+    }
+    if (executed_quantity == 0) {
+        return {false, ResultCode::InvalidQuantity,
+                "executed quantity must be positive", {}, found->second.order.quantity};
+    }
     if (executed_quantity > found->second.order.quantity) {
-        return {false, "executed quantity exceeds remaining order quantity"};
+        return {false, ResultCode::ExecutionQuantityExceedsRemaining,
+                "executed quantity exceeds remaining order quantity", {},
+                found->second.order.quantity};
     }
 
     auto& stored = found->second;
@@ -137,9 +190,9 @@ ProcessResult OrderBook::execute(OrderId id, Quantity executed_quantity) {
         level.fifo.erase(stored.position);
         if (level.fifo.empty()) levels.erase(level_it);
         orders_.erase(found);
-        return {true, "fully executed"};
+        return {true, ResultCode::Accepted, "fully executed", {}, 0};
     }
-    return {true, "partially executed"};
+    return {true, ResultCode::Accepted, "partially executed", {}, stored.order.quantity};
 }
 
 std::optional<Order> OrderBook::find_order(OrderId id) const {

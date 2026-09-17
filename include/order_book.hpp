@@ -19,26 +19,37 @@ struct TopOfBook {
     std::optional<Price> spread;
 };
 
-struct ProcessResult {
-    bool accepted;
-    std::string message;
+enum class ResultCode : std::uint16_t {
+    Accepted = 0,
+    InvalidQuantity = 1,
+    InvalidPrice = 2,
+    DuplicateOrderId = 3,
+    UnknownOrderId = 4,
+    ExecutionQuantityExceedsRemaining = 5,
+    UnsupportedEventType = 6,
+    InternalInvariantViolation = 7,
 };
 
-struct SubmitResult {
-    bool accepted;
+[[nodiscard]] const char* to_string(ResultCode code);
+
+struct EngineResult {
+    bool accepted{false};
+    ResultCode code{ResultCode::InternalInvariantViolation};
     std::string message;
     std::vector<Trade> trades;
-    Quantity resting_quantity;
+    Quantity resting_quantity{0};
+    std::uint64_t sequence{0};
 };
 
 class OrderBook {
 public:
-    ProcessResult process(const Event& event);
-    ProcessResult add(const Order& order);
-    ProcessResult cancel(OrderId id);
-    ProcessResult modify(OrderId id, Price new_price, Quantity new_quantity);
-    ProcessResult execute(OrderId id, Quantity executed_quantity);
-    SubmitResult submit(Order incoming, std::uint64_t timestamp_ns);
+    EngineResult process(const Event& event);
+    EngineResult add(const Order& order);
+    EngineResult cancel(OrderId id);
+    EngineResult modify(OrderId id, Price new_price, Quantity new_quantity,
+                        std::uint64_t timestamp_ns = 0);
+    EngineResult execute(OrderId id, Quantity executed_quantity);
+    EngineResult submit(Order incoming, std::uint64_t timestamp_ns);
 
     [[nodiscard]] TopOfBook top() const;
     [[nodiscard]] std::optional<Order> find_order(OrderId id) const;

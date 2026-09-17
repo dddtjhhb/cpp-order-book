@@ -1,6 +1,6 @@
 # C++ Limit Order Book and Matching Engine
 
-A small, reproducible market-infrastructure project for learning how ordered market events update a limit order book. Version 0.6 adds stateful property fuzzing, invariant validation, failure minimization, and a controlled mutation-testing experiment.
+A small, reproducible market-infrastructure project for learning how ordered market events update a limit order book. The current development branch adds a stable engine result contract, request correlation fields, and marketable cancel-replace behavior on top of the v0.6 property-testing work.
 
 This is an educational systems project—not a production exchange gateway, trading strategy, alpha model, or implementation of CME iLink.
 
@@ -12,6 +12,7 @@ This is an educational systems project—not a production exchange gateway, trad
 4. Reports best bid, best ask, spread, rejected events, and replay throughput.
 5. Tests ordering, cancellation, modification, partial/full execution, validation, and CSV parsing behavior.
 6. Matches crossing limit orders at resting prices and emits auditable trade records.
+7. Returns the same structured result for every command, including stable result codes, trades, resting quantity, and the request sequence.
 
 Prices are stored as integer ticks: `10025` represents `$100.25` when one tick is one cent. Integer prices avoid floating-point equality and ordering problems.
 
@@ -48,6 +49,21 @@ The book uses:
 - Any unfilled remainder becomes a resting order at the back of its price-level queue.
 
 Each trade records a trade ID, incoming and resting order IDs, execution price, quantity, and timestamp.
+
+## Engine result contract
+
+All entry points return `EngineResult`. Callers do not need a separate ADD path to receive trades.
+
+| Field | Meaning |
+|---|---|
+| `accepted` | Whether the command passed validation and was applied |
+| `code` | Stable machine-readable `ResultCode` |
+| `message` | Human-readable diagnostic text; clients should not parse it |
+| `trades` | Zero or more trades produced by ADD or a marketable MODIFY |
+| `resting_quantity` | Quantity still resting under the command's order ID |
+| `sequence` | Request sequence copied by `process(Event)` for correlation |
+
+`MODIFY` uses cancel-replace semantics when price changes or quantity increases. The old order loses priority and the replacement passes through normal matching. A same-price quantity reduction remains in place and preserves FIFO priority. Validation happens before the original order is removed.
 
 ## Build and test with CMake
 
@@ -96,15 +112,15 @@ c++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Iinclude \
 ## CSV contract
 
 ```text
-timestamp_ns,event_type,order_id,side,price_ticks,quantity
-1000,ADD,1,BUY,10025,10
-1010,ADD,2,SELL,10030,8
-1020,MODIFY,1,BUY,10025,8
-1030,EXECUTE,1,BUY,10025,3
-1040,CANCEL,1,BUY,10025,5
+timestamp_ns,event_type,order_id,side,price_ticks,quantity,symbol_id,sequence
+1000,ADD,1,BUY,10025,10,1,1
+1010,ADD,2,SELL,10030,8,1,2
+1020,MODIFY,1,BUY,10025,8,1,3
+1030,EXECUTE,1,BUY,10025,3,1,4
+1040,CANCEL,1,BUY,10025,5,1,5
 ```
 
-For `CANCEL`, only `order_id` determines which stored order is removed. For `EXECUTE`, `order_id` and `quantity` are used. The remaining columns keep the schema uniform.
+For `CANCEL`, only `order_id` determines which stored order is removed. For `EXECUTE`, `order_id` and `quantity` are used. The remaining columns keep the schema uniform. Six-column v0.6 CSV files remain valid and default both `symbol_id` and `sequence` to zero.
 
 ## Benchmark methodology
 
@@ -216,8 +232,8 @@ For this deliberately selected mutant set, unit tests killed 1/5 and the propert
 ## Current limitations
 
 - Only limit orders are matched; market orders and time-in-force instructions are not implemented.
-- Replay `MODIFY` events update resting state but do not yet emit trades when a modification becomes marketable.
 - No fees, exchange-specific protocol rules, persistence, networking, or strategy logic.
+- `symbol_id` is part of the event contract, but one `OrderBook` instance still represents one symbol; routing is not implemented yet.
 - Events are processed on one thread to preserve deterministic order.
 - The synthetic benchmark is not representative of CME traffic.
 - This code has not been connected to CME iLink, exchange multicast feeds, FPGA hardware, or colocation infrastructure.
