@@ -12,6 +12,8 @@ struct Event {
     std::uint64_t timestamp_ns;
     EventType type;
     Order order;
+    SymbolId symbol_id{1};
+    RequestSequence sequence{0};
 };
 
 }  // namespace lob

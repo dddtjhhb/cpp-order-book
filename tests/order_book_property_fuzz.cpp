@@ -1,4 +1,5 @@
 #include "order_book.hpp"
+#include "reference_book.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -45,84 +46,32 @@ std::string describe(const Operation& operation) {
     return out.str();
 }
 
-std::vector<lob::OrderId> active_ids(
-    const lob::OrderBook& book, const std::vector<lob::OrderId>& known_ids) {
-    std::vector<lob::OrderId> active;
-    for (const auto id : known_ids) {
-        if (book.find_order(id)) active.push_back(id);
+lob::Event as_event(const Operation& operation, std::uint64_t sequence) {
+    lob::EventType type = lob::EventType::Add;
+    switch (operation.type) {
+        case OperationType::Submit: type = lob::EventType::Add; break;
+        case OperationType::Cancel: type = lob::EventType::Cancel; break;
+        case OperationType::Modify: type = lob::EventType::Modify; break;
+        case OperationType::Execute: type = lob::EventType::Execute; break;
     }
-    return active;
+    return {sequence, type, {operation.id, operation.side, operation.price, operation.quantity},
+            1, sequence};
 }
 
 std::optional<Failure> replay(const std::vector<Operation>& operations) {
     lob::OrderBook book;
+    ReferenceBook reference;
     for (std::size_t step = 0; step < operations.size(); ++step) {
         const auto& operation = operations[step];
-        const auto existing = book.find_order(operation.id);
-
-        if (operation.type == OperationType::Submit) {
-            const auto before = book.top();
-            std::optional<lob::OrderId> expected_first_resting;
-            if (operation.side == lob::Side::Buy && before.best_ask &&
-                operation.price >= *before.best_ask) {
-                const auto fifo = book.fifo_at(lob::Side::Sell, *before.best_ask);
-                if (!fifo.empty()) expected_first_resting = fifo.front();
-            } else if (operation.side == lob::Side::Sell && before.best_bid &&
-                       operation.price <= *before.best_bid) {
-                const auto fifo = book.fifo_at(lob::Side::Buy, *before.best_bid);
-                if (!fifo.empty()) expected_first_resting = fifo.front();
-            }
-
-            const auto result = book.submit(
-                {operation.id, operation.side, operation.price, operation.quantity}, step + 1);
-            if (!result.accepted) return Failure{step, "valid unique submit was rejected"};
-            lob::Quantity traded = 0;
-            for (const auto& trade : result.trades) {
-                if (trade.quantity == 0) return Failure{step, "zero-quantity trade"};
-                traded += trade.quantity;
-            }
-            if (traded + result.resting_quantity != operation.quantity) {
-                return Failure{step, "submit quantity was not conserved"};
-            }
-            if (expected_first_resting &&
-                (result.trades.empty() ||
-                 result.trades.front().resting_order_id != *expected_first_resting)) {
-                return Failure{step, "first trade violated price-time priority"};
-            }
-        } else if (operation.type == OperationType::Cancel) {
-            const auto result = book.cancel(operation.id);
-            if (result.accepted != existing.has_value()) {
-                return Failure{step, "cancel acceptance disagrees with order existence"};
-            }
-        } else if (operation.type == OperationType::Execute) {
-            const auto result = book.execute(operation.id, operation.quantity);
-            const bool should_accept = existing && operation.quantity > 0 &&
-                operation.quantity <= existing->quantity;
-            if (result.accepted != should_accept) {
-                return Failure{step, "execute validation disagrees with model"};
-            }
-        } else {
-            std::vector<lob::OrderId> before_fifo;
-            if (existing) before_fifo = book.fifo_at(existing->side, existing->price);
-            const auto result = book.modify(operation.id, operation.price, operation.quantity);
-            const bool should_accept = existing && operation.price > 0 && operation.quantity > 0;
-            if (result.accepted != should_accept) {
-                return Failure{step, "modify validation disagrees with model"};
-            }
-            if (result.accepted && operation.price == existing->price &&
-                operation.quantity <= existing->quantity &&
-                book.fifo_at(existing->side, existing->price) != before_fifo) {
-                return Failure{step, "priority-preserving modify changed FIFO order"};
-            }
-            if (result.accepted && (operation.price != existing->price ||
-                                    operation.quantity > existing->quantity)) {
-                const auto after_fifo = book.fifo_at(existing->side, operation.price);
-                if (after_fifo.empty() || after_fifo.back() != operation.id) {
-                    return Failure{step, "priority-resetting modify did not move order to FIFO back"};
-                }
-            }
+        const auto event = as_event(operation, step + 1);
+        const auto actual = book.process(event);
+        const auto expected = reference.process(event);
+        if (logical_output(actual) != logical_output(expected)) {
+            return Failure{step, "logical output disagrees with independent reference"};
         }
-
+        if (!same_state(book, reference)) {
+            return Failure{step, "book state or FIFO disagrees with independent reference"};
+        }
         if (const auto invariant = book.validate_invariants()) {
             return Failure{step, *invariant};
         }
@@ -130,7 +79,7 @@ std::optional<Failure> replay(const std::vector<Operation>& operations) {
     return std::nullopt;
 }
 
-std::vector<Operation> minimize(std::vector<Operation> operations) {
+std::vector<Operation> minimize(std::vector<Operation> operations, const std::string& reason) {
     std::size_t chunk = std::max<std::size_t>(1, operations.size() / 2);
     while (chunk >= 1) {
         bool reduced = false;
@@ -139,7 +88,8 @@ std::vector<Operation> minimize(std::vector<Operation> operations) {
             candidate.reserve(operations.size() - chunk);
             candidate.insert(candidate.end(), operations.begin(), operations.begin() + start);
             candidate.insert(candidate.end(), operations.begin() + start + chunk, operations.end());
-            if (!candidate.empty() && replay(candidate)) {
+            const auto failure = replay(candidate);
+            if (!candidate.empty() && failure && failure->message == reason) {
                 operations = std::move(candidate);
                 reduced = true;
                 break;
@@ -155,41 +105,34 @@ std::vector<Operation> minimize(std::vector<Operation> operations) {
     return operations;
 }
 
-Operation generate_operation(std::mt19937_64& random, lob::OrderBook& model_book,
-                             std::vector<lob::OrderId>& known_ids, lob::OrderId& next_id) {
-    const auto active = active_ids(model_book, known_ids);
+Operation generate_operation(std::mt19937_64& random, const ReferenceBook& model_book,
+                             lob::OrderId& next_id) {
+    std::vector<lob::OrderId> active;
+    for (const auto& order : model_book.orders) active.push_back(order.id);
     const int choice = static_cast<int>(random() % 100);
     if (active.empty() || choice < 45) {
         const auto side = random() % 2 == 0 ? lob::Side::Buy : lob::Side::Sell;
         const lob::Price price = 9980 + static_cast<lob::Price>(random() % 41);
-        const lob::Quantity quantity = 1 + random() % 100;
-        const auto id = next_id++;
-        known_ids.push_back(id);
+        const lob::Quantity quantity = random() % 12 == 0 ? 0 : 1 + random() % 100;
+        const auto id = !active.empty() && random() % 8 == 0
+            ? active[random() % active.size()] : next_id++;
         Operation operation{OperationType::Submit, id, side, price, quantity};
-        model_book.submit({id, side, price, quantity}, next_id);
         return operation;
     }
 
-    const auto id = active[random() % active.size()];
-    const auto stored = *model_book.find_order(id);
+    const auto stored = model_book.orders[random() % model_book.orders.size()];
+    const auto selected_id = stored.id;
+    const auto id = random() % 10 == 0 ? next_id + 100 : selected_id;
     if (choice < 65) {
         Operation operation{OperationType::Cancel, id, stored.side, stored.price, stored.quantity};
-        model_book.cancel(id);
         return operation;
     }
     if (choice < 85) {
-        lob::Price new_price = 9980 + static_cast<lob::Price>(random() % 41);
-        const auto top = model_book.top();
-        if (stored.side == lob::Side::Buy && top.best_ask) {
-            new_price = std::min(new_price, *top.best_ask - 1);
-        } else if (stored.side == lob::Side::Sell && top.best_bid) {
-            new_price = std::max(new_price, *top.best_bid + 1);
-        }
+        const lob::Price new_price = random() % 10 == 0 ? 0 : 9980 + static_cast<lob::Price>(random() % 41);
         const lob::Quantity new_quantity = random() % 4 == 0
             ? stored.quantity
             : 1 + random() % 120;
         Operation operation{OperationType::Modify, id, stored.side, new_price, new_quantity};
-        model_book.modify(id, new_price, new_quantity);
         return operation;
     }
 
@@ -197,7 +140,6 @@ Operation generate_operation(std::mt19937_64& random, lob::OrderBook& model_book
         ? stored.quantity + 1 + random() % 10
         : 1 + random() % stored.quantity;
     Operation operation{OperationType::Execute, id, stored.side, stored.price, executed};
-    model_book.execute(id, executed);
     return operation;
 }
 
@@ -218,17 +160,17 @@ int main(int argc, char** argv) {
     if (steps == 0) return EXIT_FAILURE;
 
     std::mt19937_64 random(seed);
-    lob::OrderBook generation_model;
-    std::vector<lob::OrderId> known_ids;
+    ReferenceBook generation_model;
     std::vector<Operation> operations;
     operations.reserve(steps);
     lob::OrderId next_id = 1;
     for (std::size_t i = 0; i < steps; ++i) {
-        operations.push_back(generate_operation(random, generation_model, known_ids, next_id));
+        operations.push_back(generate_operation(random, generation_model, next_id));
+        generation_model.process(as_event(operations.back(), i + 1));
     }
 
     if (const auto failure = replay(operations)) {
-        const auto minimized = minimize(operations);
+        const auto minimized = minimize(operations, failure->message);
         const auto minimized_failure = *replay(minimized);
         save_failure(failure_path, seed, minimized, minimized_failure);
         std::cerr << "property failure: " << failure->message << " at step " << failure->step
