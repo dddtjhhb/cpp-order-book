@@ -1,0 +1,6 @@
+timestamp_ns,event_type,order_id,side,price_ticks,quantity
+1,ADD,1,BUY,100,10
+2,ADD,2,SELL,105,4
+3,ADD,3,SELL,107,3
+4,MODIFY,1,BUY,106,10
+5,MODIFY,1,BUY,107,3

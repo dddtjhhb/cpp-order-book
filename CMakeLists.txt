@@ -27,6 +27,10 @@ target_link_libraries(order_book_telemetry PRIVATE order_book)
 add_executable(order_book_property_fuzz tests/order_book_property_fuzz.cpp)
 target_link_libraries(order_book_property_fuzz PRIVATE order_book)
 
+add_executable(order_book_differential tests/order_book_differential.cpp)
+target_include_directories(order_book_differential PRIVATE tests)
+target_link_libraries(order_book_differential PRIVATE order_book)
+
 enable_testing()
 add_test(NAME order_book_tests COMMAND order_book_tests)
 add_test(NAME engine_contract_tests COMMAND engine_contract_tests)
@@ -39,3 +43,13 @@ add_test(NAME benchmark_matching_smoke COMMAND order_book_benchmark 100 matching
 add_test(NAME telemetry_smoke COMMAND order_book_telemetry telemetry_smoke.csv 4 100 2 50)
 add_test(NAME property_fuzz_seed_1 COMMAND order_book_property_fuzz 1 2000 fuzz_failure_seed_1.txt)
 add_test(NAME property_fuzz_seed_42 COMMAND order_book_property_fuzz 42 2000 fuzz_failure_seed_42.txt)
+add_test(NAME differential_seed_1 COMMAND order_book_differential 1 5000 differential_failure_seed_1.csv)
+add_test(NAME differential_seed_42 COMMAND order_book_differential 42 5000 differential_failure_seed_42.csv)
+add_test(NAME differential_seed_2026 COMMAND order_book_differential 2026 5000 differential_failure_seed_2026.csv)
+
+# Regression corpus: every saved reproducer must replay identically forever.
+file(GLOB DIFFERENTIAL_CORPUS CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tests/corpus/*.csv)
+foreach(corpus_file ${DIFFERENTIAL_CORPUS})
+    get_filename_component(corpus_name ${corpus_file} NAME_WE)
+    add_test(NAME corpus_${corpus_name} COMMAND order_book_differential --replay ${corpus_file})
+endforeach()
