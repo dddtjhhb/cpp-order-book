@@ -33,14 +33,10 @@ int main(int argc, char** argv) {
 
         const auto start = std::chrono::steady_clock::now();
         for (const auto& event : events) {
-            if (event.type == lob::EventType::Add) {
-                const auto result = book.submit(event.order, event.timestamp_ns);
-                if (!result.accepted) ++rejected;
-                trade_count += result.trades.size();
-                for (const auto& trade : result.trades) traded_quantity += trade.quantity;
-            } else if (!book.process(event).accepted) {
-                ++rejected;
-            }
+            const auto result = book.process(event);
+            if (!result.accepted) ++rejected;
+            trade_count += result.trades.size();
+            for (const auto& trade : result.trades) traded_quantity += trade.quantity;
         }
         const auto elapsed = std::chrono::steady_clock::now() - start;
         const double seconds = std::chrono::duration<double>(elapsed).count();
@@ -58,6 +54,10 @@ int main(int argc, char** argv) {
         std::cout << '\n';
         std::cout << "elapsed_seconds=" << seconds
                   << " events_per_second=" << (seconds > 0 ? events.size() / seconds : 0) << '\n';
+        if (const auto violation = book.validate_invariants()) {
+            std::cerr << "error: final book violates invariant: " << *violation << '\n';
+            return 1;
+        }
     } catch (const std::exception& error) {
         std::cerr << "error: " << error.what() << '\n';
         return 1;

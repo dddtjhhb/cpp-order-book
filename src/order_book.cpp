@@ -7,21 +7,27 @@
 
 namespace lob {
 
-ProcessResult OrderBook::process(const Event& event) {
+SubmitResult OrderBook::process(const Event& event) {
     switch (event.type) {
         case EventType::Add:
-        {
-            const auto result = submit(event.order, event.timestamp_ns);
-            return {result.accepted, result.message};
-        }
+            return submit(event.order, event.timestamp_ns);
         case EventType::Cancel:
-            return cancel(event.order.id);
+        {
+            auto result = cancel(event.order.id);
+            return {result.accepted, std::move(result.message), {}, 0};
+        }
         case EventType::Modify:
-            return modify(event.order.id, event.order.price, event.order.quantity);
+            return modify(event.order.id, event.order.price, event.order.quantity,
+                          event.timestamp_ns);
         case EventType::Execute:
-            return execute(event.order.id, event.order.quantity);
+        {
+            auto result = execute(event.order.id, event.order.quantity);
+            const auto remaining = find_order(event.order.id);
+            return {result.accepted, std::move(result.message), {},
+                    remaining ? remaining->quantity : 0};
+        }
     }
-    return {false, "unsupported event type"};
+    return {false, "unsupported event type", {}, 0};
 }
 
 SubmitResult OrderBook::submit(Order incoming, std::uint64_t timestamp_ns) {
@@ -100,23 +106,28 @@ ProcessResult OrderBook::cancel(OrderId id) {
     return {true, "cancelled"};
 }
 
-ProcessResult OrderBook::modify(OrderId id, Price new_price, Quantity new_quantity) {
+SubmitResult OrderBook::modify(OrderId id, Price new_price, Quantity new_quantity,
+                              std::uint64_t timestamp_ns) {
     auto found = orders_.find(id);
-    if (found == orders_.end()) return {false, "unknown order id"};
-    if (new_price <= 0) return {false, "price must be positive"};
-    if (new_quantity == 0) return {false, "quantity must be positive"};
+    if (found == orders_.end()) return {false, "unknown order id", {}, 0};
+    if (new_price <= 0) return {false, "price must be positive", {}, 0};
+    if (new_quantity == 0) return {false, "quantity must be positive", {}, 0};
 
     const Order old = found->second.order;
     if (new_price == old.price && new_quantity <= old.quantity) {
         auto& level = levels_for(old.side).at(old.price);
         level.total_quantity -= old.quantity - new_quantity;
         found->second.order.quantity = new_quantity;
-        return {true, "modified in place; priority preserved"};
+        return {true, "modified in place; priority preserved", {}, new_quantity};
     }
 
+    // Cancel/replace: the replacement goes through the same matching path as a
+    // new order, so a marketable modification can never leave a crossed book.
+    // All validation happened above, so the resubmission cannot be rejected.
     erase_order(found);
-    const auto result = add(Order{id, old.side, new_price, new_quantity});
-    return result.accepted ? ProcessResult{true, "modified; priority reset"} : result;
+    auto result = submit(Order{id, old.side, new_price, new_quantity}, timestamp_ns);
+    if (result.accepted && result.trades.empty()) result.message = "modified; priority reset";
+    return result;
 }
 
 ProcessResult OrderBook::execute(OrderId id, Quantity executed_quantity) {

@@ -4,6 +4,7 @@
 #include "trade.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <list>
 #include <map>
 #include <optional>
@@ -24,6 +25,8 @@ struct ProcessResult {
     std::string message;
 };
 
+// Result of any operation that may cross the spread (new order or marketable
+// modification). `resting_quantity` is what remains on the book afterwards.
 struct SubmitResult {
     bool accepted;
     std::string message;
@@ -33,10 +36,16 @@ struct SubmitResult {
 
 class OrderBook {
 public:
-    ProcessResult process(const Event& event);
+    // Applies one event. ADD and MODIFY may cross the spread, so the result
+    // carries any trades the event produced.
+    SubmitResult process(const Event& event);
     ProcessResult add(const Order& order);
     ProcessResult cancel(OrderId id);
-    ProcessResult modify(OrderId id, Price new_price, Quantity new_quantity);
+    // A same-price quantity decrease keeps priority in place. Any other change
+    // is treated as cancel + new order: it loses priority and, if the new price
+    // is marketable, matches against the opposite side before resting.
+    SubmitResult modify(OrderId id, Price new_price, Quantity new_quantity,
+                        std::uint64_t timestamp_ns = 0);
     ProcessResult execute(OrderId id, Quantity executed_quantity);
     SubmitResult submit(Order incoming, std::uint64_t timestamp_ns);
 
