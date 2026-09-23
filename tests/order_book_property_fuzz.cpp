@@ -104,21 +104,46 @@ std::optional<Failure> replay(const std::vector<Operation>& operations) {
         } else {
             std::vector<lob::OrderId> before_fifo;
             if (existing) before_fifo = book.fifo_at(existing->side, existing->price);
-            const auto result = book.modify(operation.id, operation.price, operation.quantity);
+            const auto before = book.top();
+            const auto result = book.modify(operation.id, operation.price, operation.quantity,
+                                            step + 1);
             const bool should_accept = existing && operation.price > 0 && operation.quantity > 0;
             if (result.accepted != should_accept) {
                 return Failure{step, "modify validation disagrees with model"};
             }
-            if (result.accepted && operation.price == existing->price &&
-                operation.quantity <= existing->quantity &&
-                book.fifo_at(existing->side, existing->price) != before_fifo) {
-                return Failure{step, "priority-preserving modify changed FIFO order"};
-            }
-            if (result.accepted && (operation.price != existing->price ||
-                                    operation.quantity > existing->quantity)) {
-                const auto after_fifo = book.fifo_at(existing->side, operation.price);
-                if (after_fifo.empty() || after_fifo.back() != operation.id) {
-                    return Failure{step, "priority-resetting modify did not move order to FIFO back"};
+            if (result.accepted) {
+                const bool keeps_priority = operation.price == existing->price &&
+                    operation.quantity <= existing->quantity;
+                lob::Quantity traded = 0;
+                for (const auto& trade : result.trades) {
+                    if (trade.quantity == 0) return Failure{step, "zero-quantity trade"};
+                    if (trade.incoming_order_id != operation.id) {
+                        return Failure{step, "modify trade has wrong aggressor"};
+                    }
+                    traded += trade.quantity;
+                }
+                if (traded + result.resting_quantity != operation.quantity) {
+                    return Failure{step, "modify quantity was not conserved"};
+                }
+                const bool marketable = existing->side == lob::Side::Buy
+                    ? before.best_ask && operation.price >= *before.best_ask
+                    : before.best_bid && operation.price <= *before.best_bid;
+                if (!keeps_priority && marketable && result.trades.empty()) {
+                    return Failure{step, "marketable modify did not trade"};
+                }
+                if (keeps_priority &&
+                    book.fifo_at(existing->side, existing->price) != before_fifo) {
+                    return Failure{step, "priority-preserving modify changed FIFO order"};
+                }
+                if (!keeps_priority && result.resting_quantity > 0) {
+                    const auto after_fifo = book.fifo_at(existing->side, operation.price);
+                    if (after_fifo.empty() || after_fifo.back() != operation.id) {
+                        return Failure{step,
+                                       "priority-resetting modify did not move order to FIFO back"};
+                    }
+                }
+                if (result.resting_quantity == 0 && book.find_order(operation.id)) {
+                    return Failure{step, "fully filled modify left an order on the book"};
                 }
             }
         }
@@ -178,13 +203,10 @@ Operation generate_operation(std::mt19937_64& random, lob::OrderBook& model_book
         return operation;
     }
     if (choice < 85) {
-        lob::Price new_price = 9980 + static_cast<lob::Price>(random() % 41);
-        const auto top = model_book.top();
-        if (stored.side == lob::Side::Buy && top.best_ask) {
-            new_price = std::min(new_price, *top.best_ask - 1);
-        } else if (stored.side == lob::Side::Sell && top.best_bid) {
-            new_price = std::max(new_price, *top.best_bid + 1);
-        }
+        // Prices are drawn from the full band, so a modification may cross the
+        // spread. (v0.6 clamped them to the passive side, which hid the bug
+        // where a marketable MODIFY left a crossed book.)
+        const lob::Price new_price = 9980 + static_cast<lob::Price>(random() % 41);
         const lob::Quantity new_quantity = random() % 4 == 0
             ? stored.quantity
             : 1 + random() % 120;

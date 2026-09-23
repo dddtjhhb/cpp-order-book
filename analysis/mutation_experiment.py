@@ -46,6 +46,13 @@ MUTANTS = [
         "incoming.price <= resting_price",
         "incoming.price < resting_price",
     ),
+    # Reintroduces the v0.6 bug: a marketable MODIFY rests without matching.
+    Mutant(
+        "modify_skips_matching",
+        "auto result = submit(Order{id, old.side, new_price, new_quantity}, timestamp_ns);",
+        "auto result = SubmitResult{add(Order{id, old.side, new_price, new_quantity}).accepted,"
+        " \"\", {}, new_quantity};",
+    ),
 ]
 
 
