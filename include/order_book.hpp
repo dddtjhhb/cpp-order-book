@@ -20,6 +20,14 @@ struct TopOfBook {
     std::optional<Price> spread;
 };
 
+// One price level, best-first when returned by OrderBook::depth(). Orders are
+// listed in FIFO priority order.
+struct LevelView {
+    Price price;
+    Quantity total_quantity;
+    std::vector<Order> orders;
+};
+
 // Numeric values are part of the logical engine contract, not a wire encoding.
 enum class ResultCode : std::uint16_t {
     Accepted = 0,
@@ -66,6 +74,8 @@ public:
     [[nodiscard]] TopOfBook top() const;
     [[nodiscard]] std::optional<Order> find_order(OrderId id) const;
     [[nodiscard]] std::vector<OrderId> fifo_at(Side side, Price price) const;
+    // Full book state for one side, best price first. O(orders on that side).
+    [[nodiscard]] std::vector<LevelView> depth(Side side) const;
     [[nodiscard]] std::size_t order_count() const { return orders_.size(); }
     [[nodiscard]] std::size_t bid_level_count() const { return bids_.size(); }
     [[nodiscard]] std::size_t ask_level_count() const { return asks_.size(); }

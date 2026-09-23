@@ -258,6 +258,21 @@ int main() {
     check(crlf_events[0].order.price == -3,
           "CSV parses signed price; the book, not the parser, rejects it");
 
+    lob::OrderBook depth_book;
+    depth_book.add(order(1, lob::Side::Buy, 100, 5));
+    depth_book.add(order(2, lob::Side::Buy, 101, 3));
+    depth_book.add(order(3, lob::Side::Buy, 101, 4));
+    depth_book.add(order(4, lob::Side::Sell, 105, 2));
+    const auto bids = depth_book.depth(lob::Side::Buy);
+    check(bids.size() == 2 && bids[0].price == 101 && bids[1].price == 100,
+          "bid depth is best price first");
+    check(bids[0].total_quantity == 7 && bids[0].orders.size() == 2 &&
+              bids[0].orders[0].id == 2 && bids[0].orders[1].id == 3,
+          "depth level lists orders in FIFO order with total");
+    const auto asks = depth_book.depth(lob::Side::Sell);
+    check(asks.size() == 1 && asks[0].price == 105 && asks[0].total_quantity == 2,
+          "ask depth is reported");
+
     if (failures == 0) {
         std::cout << "All order-book tests passed.\n";
     }

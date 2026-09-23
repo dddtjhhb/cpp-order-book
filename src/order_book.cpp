@@ -194,6 +194,25 @@ std::vector<OrderId> OrderBook::fifo_at(Side side, Price price) const {
     return {found->second.fifo.begin(), found->second.fifo.end()};
 }
 
+std::vector<LevelView> OrderBook::depth(Side side) const {
+    std::vector<LevelView> result;
+    const auto append = [&](const auto& entry) {
+        const auto& [price, level] = entry;
+        LevelView view{price, level.total_quantity, {}};
+        view.orders.reserve(level.fifo.size());
+        for (const OrderId id : level.fifo) view.orders.push_back(orders_.at(id).order);
+        result.push_back(std::move(view));
+    };
+    const auto& levels = levels_for(side);
+    result.reserve(levels.size());
+    if (side == Side::Buy) {
+        for (auto it = levels.rbegin(); it != levels.rend(); ++it) append(*it);
+    } else {
+        for (const auto& entry : levels) append(entry);
+    }
+    return result;
+}
+
 OrderBook::Levels& OrderBook::levels_for(Side side) {
     return side == Side::Buy ? bids_ : asks_;
 }
