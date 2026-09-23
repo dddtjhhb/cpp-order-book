@@ -70,10 +70,26 @@ jobs:
             -o build/engine_contract_tests_sanitized
           ./build/engine_contract_tests_sanitized
 
+      - name: Run differential fuzzer with sanitizers
+        run: |
+          c++ -std=c++17 -O1 -g -fsanitize=address,undefined \
+            -fno-omit-frame-pointer -Wall -Wextra -Wpedantic -Iinclude -Itests \
+            src/order_book.cpp src/csv_reader.cpp tests/order_book_differential.cpp \
+            -o build/order_book_differential_sanitized
+          for seed in 1 7 42 2026 20260831; do
+            ./build/order_book_differential_sanitized "$seed" 5000 "build/differential_failure_$seed.csv"
+          done
+          for corpus in tests/corpus/*.csv; do
+            ./build/order_book_differential_sanitized --replay "$corpus"
+          done
+
       - name: Upload fuzz failure reproducers
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-failures
-          path: build/fuzz_failure*.txt
+          path: |
+            build/fuzz_failure*.txt
+            build/differential_failure*
+            differential_replay_failure.csv*
           if-no-files-found: ignore

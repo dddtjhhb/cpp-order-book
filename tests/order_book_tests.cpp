@@ -272,10 +272,10 @@ int main() {
           "CSV parses signed price; the book, not the parser, rejects it");
 
     lob::OrderBook depth_book;
-    depth_book.add(order(1, lob::Side::Buy, 100, 5));
-    depth_book.add(order(2, lob::Side::Buy, 101, 3));
-    depth_book.add(order(3, lob::Side::Buy, 101, 4));
-    depth_book.add(order(4, lob::Side::Sell, 105, 2));
+    depth_book.submit(order(1, lob::Side::Buy, 100, 5), 0);
+    depth_book.submit(order(2, lob::Side::Buy, 101, 3), 0);
+    depth_book.submit(order(3, lob::Side::Buy, 101, 4), 0);
+    depth_book.submit(order(4, lob::Side::Sell, 105, 2), 0);
     const auto bids = depth_book.depth(lob::Side::Buy);
     check(bids.size() == 2 && bids[0].price == 101 && bids[1].price == 100,
           "bid depth is best price first");
