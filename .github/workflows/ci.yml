@@ -50,4 +50,22 @@ jobs:
             -fno-omit-frame-pointer -Wall -Wextra -Wpedantic -Iinclude \
             src/order_book.cpp tests/order_book_property_fuzz.cpp \
             -o build/order_book_property_fuzz_sanitized
-          ./build/order_book_property_fuzz_sanitized 20260831 5000 build/fuzz_failure_sanitized.txt
+          for seed in 1 7 42 2026 20260831; do
+            ./build/order_book_property_fuzz_sanitized "$seed" 5000 "build/fuzz_failure_sanitized_$seed.txt"
+          done
+
+      - name: Run unit tests with sanitizers
+        run: |
+          c++ -std=c++17 -O1 -g -fsanitize=address,undefined \
+            -fno-omit-frame-pointer -Wall -Wextra -Wpedantic -Iinclude \
+            src/order_book.cpp src/csv_reader.cpp tests/order_book_tests.cpp \
+            -o build/order_book_tests_sanitized
+          ./build/order_book_tests_sanitized
+
+      - name: Upload fuzz failure reproducers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-failures
+          path: build/fuzz_failure*.txt
+          if-no-files-found: ignore

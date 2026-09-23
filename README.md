@@ -1,6 +1,6 @@
 # C++ Limit Order Book and Matching Engine
 
-A small, reproducible market-infrastructure project for learning how ordered market events update a limit order book. Version 0.6 adds stateful property fuzzing, invariant validation, failure minimization, and a controlled mutation-testing experiment.
+A small, reproducible market-infrastructure project for learning how ordered market events update a limit order book. Version 0.7 is a correctness release: marketable modifications now match instead of leaving a crossed book, the CSV reader rejects malformed numbers instead of silently wrapping them, and the property fuzzer no longer avoids the input region that hid the modify bug. See [v0.7 correctness fixes](#v07-correctness-fixes).
 
 This is an educational systems project—not a production exchange gateway, trading strategy, alpha model, or implementation of CME iLink.
 
@@ -46,6 +46,7 @@ The book uses:
 - Trades use the resting order's price.
 - One incoming order may sweep multiple price levels.
 - Any unfilled remainder becomes a resting order at the back of its price-level queue.
+- A price change or quantity increase is a cancel/replace: the replacement goes through the same matching path as a new order, so a modification that crosses the spread trades immediately (the modified order is the aggressor).
 
 Each trade records a trade ID, incoming and resting order IDs, execution price, quantity, and timestamp.
 
@@ -105,6 +106,10 @@ timestamp_ns,event_type,order_id,side,price_ticks,quantity
 ```
 
 For `CANCEL`, only `order_id` determines which stored order is removed. For `EXECUTE`, `order_id` and `quantity` are used. The remaining columns keep the schema uniform.
+
+`EXECUTE` is an externally reported fill against a resting order (market-data replay semantics). Trades produced by the engine's own matching come from `ADD` and `MODIFY`; they are returned by `OrderBook::process()` and counted by the replay CLI.
+
+Parsing is strict: every row must have exactly six columns; integer fields must be plain base-10 digits with no whitespace, `+`, or trailing characters; `timestamp_ns`, `order_id`, and `quantity` must be non-negative and fit in 64 bits. Violations raise an error naming the line and column. Windows (CRLF) line endings are accepted. `price_ticks` is signed so that the book—not the parser—owns the rule that prices must be positive. The replay CLI exits non-zero if the final book fails `validate_invariants()`.
 
 ## Benchmark methodology
 
@@ -202,30 +207,54 @@ The seed makes a generated run reproducible. If a property fails, the runner rem
 | Reset FIFO priority for an equal-quantity modification | Survived | Killed |
 | Require strict inequality for a crossing buy | Killed | Killed |
 | Require strict inequality for a crossing sell | Survived | Killed |
+| Marketable modify rests without matching (the v0.6 bug) | Killed | Killed |
 
-For this deliberately selected mutant set, unit tests killed 1/5 and the property fuzzer killed 5/5. This does not establish a general detection rate: the mutants are few, hand-written, and related to the encoded properties. It demonstrates that invariant-driven random sequences cover interactions absent from the current example-based tests.
+For the original five mutants, unit tests killed 1/5 and the property fuzzer killed 5/5. The sixth mutant was added in v0.7 and reintroduces the modify bug; the v0.6 fuzzer does not kill it (see below). This does not establish a general detection rate: the mutants are few, hand-written, and related to the encoded properties. It demonstrates that invariant-driven random sequences cover interactions absent from the current example-based tests.
+
+## v0.7 correctness fixes
+
+Two bugs were confirmed in v0.6 and are now covered by regression tests in `tests/order_book_tests.cpp`.
+
+**1. A marketable `MODIFY` left a crossed book.** With `BUY 1 @ 100` and `SELL 2 @ 105` resting, `MODIFY 1 -> BUY @ 110` rested the bid above the ask (spread `-0.05`) with no trade, and `validate_invariants()` reported `crossed resting book`. The fix routes every priority-resetting modification through `submit()`, so it matches exactly like a new order before any remainder rests. `modify()` and `process()` now return `SubmitResult`, which carries the trades.
+
+**2. Negative CSV quantities were accepted.** `std::stoull("-5")` returns `2^64 - 5`, so a row with quantity `-5` created an order for 18,446,744,073,709,551,611 shares. The reader now uses `std::from_chars`, requires the whole field to be consumed, and reports overflow.
+
+**Why the fuzzer missed bug 1.** The v0.6 generator clamped modify prices to the passive side of the spread (`min(price, best_ask - 1)` for bids), so the crossing path was never exercised. v0.7 draws modify prices from the full band and adds modify-specific properties: quantity conservation, the modified order as aggressor, "a marketable modify must trade", and "a fully filled modify leaves no order". Reintroducing the bug as a mutant shows the difference:
+
+| Fuzzer | Seeds 1, 7, 42, 2026, 20260831 × 5,000 steps |
+|---|---|
+| v0.6 (clamped) | all pass — bug not detected |
+| v0.7 (full band) | fails at step 28 of seed 1; minimized to 3 operations |
+
+```text
+# reason=marketable modify did not trade
+SUBMIT,2299,BUY,10009,91
+SUBMIT,2302,SELL,10020,25
+MODIFY,2302,SELL,10005,64
+```
+
+The lesson is that a random-testing harness is only as good as its input distribution: a constraint added to keep generated states "valid" silently removed the interesting ones.
+
+Verification for this release: unit and property tests under ASan/UBSan, 40 sanitized seeds × 5,000 steps, 100 release seeds × 20,000 steps, and the mutation experiment. Replay throughput is unchanged within run-to-run noise.
 
 ## Priority rules
 
 - New orders join the back of their price level's FIFO queue.
 - A quantity decrease at the same price preserves priority.
-- A quantity increase or price change resets priority.
+- A quantity increase or price change resets priority, and matches first if the new price is marketable.
 - A partial execution reduces remaining quantity without changing priority.
 - A full execution removes the order and deletes an empty price level.
 
 ## Current limitations
 
 - Only limit orders are matched; market orders and time-in-force instructions are not implemented.
-- Replay `MODIFY` events update resting state but do not yet emit trades when a modification becomes marketable.
 - No fees, exchange-specific protocol rules, persistence, networking, or strategy logic.
 - Events are processed on one thread to preserve deterministic order.
 - The synthetic benchmark is not representative of CME traffic.
 - This code has not been connected to CME iLink, exchange multicast feeds, FPGA hardware, or colocation infrastructure.
 
-## Next engineering experiments
+## Roadmap
 
-1. Add coverage-guided fuzzing and compare reached branches with the fixed-seed generator.
-2. Expand mutation operators and repeat the comparison on an independently chosen mutant set.
-3. Repeat each regression scenario across processes and report uncertainty across runs.
-4. Use a system profiler to identify allocation and container hot spots after an alarm.
-5. Test networked replay while separating transport, parsing, and book-processing cost.
+1. **v0.8 — differential testing.** A deliberately simple `ReferenceBook` (vector + linear scan) driven in lockstep with `OrderBook`, comparing trade streams, top of book, and per-level quantities after every operation. This replaces the current setup where the generator's model is the implementation under test.
+2. **v0.9 — event log, snapshots, deterministic replay.** Sequenced input/output log; periodic snapshots; recovery from snapshot + log tail must reproduce the same state hash and trade stream as a full replay.
+3. **v1.0 — mixed-workload benchmark and a profiling-driven optimization.** Deep books, realistic ADD/CANCEL/MODIFY/aggressive mix, repeated runs with uncertainty, then one measured change at a time (e.g. allocation-free result types, pooled intrusive order lists), each guarded by the differential tests.
