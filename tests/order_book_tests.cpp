@@ -20,6 +20,16 @@ lob::Order order(lob::OrderId id, lob::Side side, lob::Price price, lob::Quantit
     return {id, side, price, quantity};
 }
 
+bool csv_rejects(const std::string& row) {
+    std::istringstream input("timestamp_ns,event_type,order_id,side,price_ticks,quantity\n" + row);
+    try {
+        lob::read_events(input);
+    } catch (const std::runtime_error&) {
+        return true;
+    }
+    return false;
+}
+
 }  // namespace
 
 int main() {
@@ -117,6 +127,67 @@ int main() {
     check(events[1].type == lob::EventType::Modify, "parse modify type");
     check(events[2].type == lob::EventType::Execute, "parse execute type");
     check(events[3].type == lob::EventType::Cancel, "parse cancel type");
+
+    // Regression (v0.6): a MODIFY that moved a bid through the best ask left a
+    // crossed resting book (best_bid 110 > best_ask 105) with no trade.
+    lob::OrderBook modify_cross;
+    check(modify_cross.add(order(1, lob::Side::Buy, 100, 10)).accepted, "seed modify bid");
+    check(modify_cross.add(order(2, lob::Side::Sell, 105, 4)).accepted, "seed modify ask");
+    check(modify_cross.add(order(3, lob::Side::Sell, 107, 3)).accepted, "seed second modify ask");
+    const auto crossing_modify = modify_cross.modify(1, 106, 10, 9000);
+    check(crossing_modify.accepted, "marketable modify accepted");
+    check(crossing_modify.trades.size() == 1, "marketable modify trades against best ask");
+    check(crossing_modify.trades[0].incoming_order_id == 1 &&
+              crossing_modify.trades[0].resting_order_id == 2,
+          "modified order is the aggressor");
+    check(crossing_modify.trades[0].price == 105 && crossing_modify.trades[0].quantity == 4,
+          "modify trade uses resting price and quantity");
+    check(crossing_modify.trades[0].timestamp_ns == 9000, "modify trade carries event time");
+    check(crossing_modify.resting_quantity == 6, "modify remainder rests");
+    check(modify_cross.find_order(1)->price == 106 && modify_cross.find_order(1)->quantity == 6,
+          "modify remainder rests at new limit");
+    check(modify_cross.top().best_bid == 106 && modify_cross.top().best_ask == 107,
+          "book is uncrossed after marketable modify");
+    check(!modify_cross.validate_invariants().has_value(), "marketable modify keeps invariants");
+
+    const auto sweeping_modify = modify_cross.modify(1, 107, 3, 9010);
+    check(sweeping_modify.accepted && sweeping_modify.resting_quantity == 0,
+          "modify can fully fill");
+    check(!modify_cross.find_order(1).has_value(), "fully filled modify leaves no order");
+    check(modify_cross.order_count() == 0, "fully filled modify empties book");
+
+    lob::OrderBook replay_cross;
+    const auto replayed = replay_cross.process(
+        {9020, lob::EventType::Add, order(10, lob::Side::Sell, 200, 5)});
+    check(replayed.accepted, "process add accepted");
+    replay_cross.process({9030, lob::EventType::Add, order(11, lob::Side::Buy, 190, 5)});
+    const auto replay_modify = replay_cross.process(
+        {9040, lob::EventType::Modify, order(11, lob::Side::Buy, 200, 5)});
+    check(replay_modify.trades.size() == 1, "process() reports trades from MODIFY");
+    check(!replay_cross.validate_invariants().has_value(), "replayed modify keeps invariants");
+
+    // Regression (v0.6): std::stoull wrapped "-5" to 2^64 - 5 and the order was
+    // accepted with 18446744073709551611 shares.
+    check(csv_rejects("1,ADD,1,BUY,100,-5\n"), "CSV rejects negative quantity");
+    check(csv_rejects("1,ADD,-1,BUY,100,5\n"), "CSV rejects negative order id");
+    check(csv_rejects("-1,ADD,1,BUY,100,5\n"), "CSV rejects negative timestamp");
+    check(csv_rejects("1,ADD,1,BUY,100,18446744073709551616\n"), "CSV rejects quantity overflow");
+    check(csv_rejects("1,ADD,1,BUY,9223372036854775808,5\n"), "CSV rejects price overflow");
+    check(csv_rejects("1,ADD,1,BUY,100,5x\n"), "CSV rejects trailing garbage");
+    check(csv_rejects("1,ADD,1,BUY,100, 5\n"), "CSV rejects embedded whitespace");
+    check(csv_rejects("1,ADD,1,BUY,100,\n"), "CSV rejects empty field");
+    check(csv_rejects("1,ADD,1,BUY,100,5,extra\n"), "CSV rejects extra column");
+    check(csv_rejects("1,ADD,1,BUY,100\n"), "CSV rejects missing column");
+    check(csv_rejects("1,ADD,1,HOLD,100,5\n"), "CSV rejects unknown side");
+
+    std::istringstream crlf(
+        "timestamp_ns,event_type,order_id,side,price_ticks,quantity\r\n"
+        "1,ADD,7,SELL,-3,5\r\n");
+    const auto crlf_events = lob::read_events(crlf);
+    check(crlf_events.size() == 1 && crlf_events[0].order.quantity == 5,
+          "CSV accepts CRLF line endings");
+    check(crlf_events[0].order.price == -3,
+          "CSV parses signed price; the book, not the parser, rejects it");
 
     if (failures == 0) {
         std::cout << "All order-book tests passed.\n";
