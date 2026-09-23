@@ -235,6 +235,19 @@ int main() {
     check(replay_modify.trades.size() == 1, "process() reports trades from MODIFY");
     check(!replay_cross.validate_invariants().has_value(), "replayed modify keeps invariants");
 
+    // Regression (v0.7, found by the differential fuzzer): a rejected EXECUTE
+    // reported the order's remaining quantity instead of 0.
+    lob::OrderBook rejected_execute;
+    rejected_execute.process({1, lob::EventType::Add, order(2157, lob::Side::Sell, 9991, 24)});
+    const auto over_execute = rejected_execute.process(
+        {2, lob::EventType::Execute, order(2157, lob::Side::Sell, 9991, 28)});
+    check(!over_execute.accepted, "over-execution rejected through process()");
+    check(over_execute.resting_quantity == 0, "rejected execution reports zero resting quantity");
+    const auto partial_execute = rejected_execute.process(
+        {3, lob::EventType::Execute, order(2157, lob::Side::Sell, 9991, 4)});
+    check(partial_execute.accepted && partial_execute.resting_quantity == 20,
+          "accepted execution reports remaining quantity");
+
     // Regression (v0.6): std::stoull wrapped "-5" to 2^64 - 5 and the order was
     // accepted with 18446744073709551611 shares.
     check(csv_rejects("1,ADD,1,BUY,100,-5\n"), "CSV rejects negative quantity");
