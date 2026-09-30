@@ -240,7 +240,7 @@ The seed makes a generated run reproducible. If a property fails, the runner rem
 
 ### Mutation experiment
 
-`analysis/mutation_experiment.py` creates temporary source copies, injects five controlled faults, and runs both unit-test binaries and up to five fixed-seed property-fuzz runs (stopping after the first kill). Compilation failures abort the experiment instead of being counted as killed mutants. Mutated source files are deleted with the temporary directory and never replace production code.
+`analysis/mutation_experiment.py` creates temporary source copies, injects six controlled faults, and runs both unit-test binaries and up to five fixed-seed property-fuzz runs (stopping after the first kill). Compilation failures abort the experiment instead of being counted as killed mutants. Mutated source files are deleted with the temporary directory and never replace production code.
 
 The following table records the **historical v0.6 experiment**, before the v0.7
 contract tests and independent reference model. Current rerun results are stored in
@@ -262,7 +262,7 @@ In that v0.6 run, for this deliberately selected mutant set, unit tests killed 1
 
 - New orders join the back of their price level's FIFO queue.
 - A quantity decrease at the same price preserves priority.
-- A quantity increase or price change resets priority.
+- A quantity increase or price change resets priority and matches immediately if the replacement is marketable.
 - A partial execution reduces remaining quantity without changing priority.
 - A full execution removes the order and deletes an empty price level.
 

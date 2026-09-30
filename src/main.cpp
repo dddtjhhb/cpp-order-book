@@ -54,6 +54,10 @@ int main(int argc, char** argv) {
         std::cout << '\n';
         std::cout << "elapsed_seconds=" << seconds
                   << " events_per_second=" << (seconds > 0 ? events.size() / seconds : 0) << '\n';
+        if (const auto violation = book.validate_invariants()) {
+            std::cerr << "error: final book violates invariant: " << *violation << '\n';
+            return 1;
+        }
     } catch (const std::exception& error) {
         std::cerr << "error: " << error.what() << '\n';
         return 1;

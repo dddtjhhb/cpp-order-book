@@ -46,6 +46,13 @@ MUTANTS = [
         "incoming.price <= resting_price",
         "incoming.price < resting_price",
     ),
+    # Reintroduces the v0.6 bug: a marketable MODIFY rests without matching.
+    Mutant(
+        "modify_skips_matching",
+        "return submit(replacement, timestamp_ns);",
+        "add_resting(replacement);\n"
+        "    return result(ResultCode::Accepted, \"mutant: rested without matching\", {}, new_quantity);",
+    ),
 ]
 
 

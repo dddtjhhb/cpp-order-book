@@ -4,6 +4,7 @@
 #include "trade.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <list>
 #include <map>
 #include <optional>

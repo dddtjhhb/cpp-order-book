@@ -8,18 +8,18 @@
 namespace lob {
 namespace {
 
-Side parse_side(const std::string& text) {
+Side parse_side(std::string_view text) {
     if (text == "BUY") return Side::Buy;
     if (text == "SELL") return Side::Sell;
-    throw std::runtime_error("invalid side: " + text);
+    throw std::runtime_error("invalid side: " + std::string(text));
 }
 
-EventType parse_type(const std::string& text) {
+EventType parse_type(std::string_view text) {
     if (text == "ADD") return EventType::Add;
     if (text == "CANCEL") return EventType::Cancel;
     if (text == "MODIFY") return EventType::Modify;
     if (text == "EXECUTE") return EventType::Execute;
-    throw std::runtime_error("invalid event type: " + text);
+    throw std::runtime_error("invalid event type: " + std::string(text));
 }
 
 template <typename Integer>
@@ -47,23 +47,23 @@ std::vector<std::string> fields(const std::string& line) {
 
 std::vector<Event> read_events(std::istream& input) {
     std::vector<Event> events;
-    std::string line;
+    std::string raw_line;
     std::size_t line_number = 0;
     std::size_t schema_columns = 0;
     constexpr std::string_view legacy_header =
         "timestamp_ns,event_type,order_id,side,price_ticks,quantity";
     const std::string extended_header = std::string(legacy_header) + ",symbol_id,sequence";
 
-    while (std::getline(input, line)) {
+    while (std::getline(input, raw_line)) {
         ++line_number;
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (line.empty()) continue;
-        if (line_number == 1 && (line == legacy_header || line == extended_header)) {
-            schema_columns = line == legacy_header ? 6 : 8;
+        if (!raw_line.empty() && raw_line.back() == '\r') raw_line.pop_back();
+        if (raw_line.empty()) continue;
+        if (line_number == 1 && (raw_line == legacy_header || raw_line == extended_header)) {
+            schema_columns = raw_line == legacy_header ? 6 : 8;
             continue;
         }
         try {
-            const auto row = fields(line);
+            const auto row = fields(raw_line);
             if ((row.size() != 6 && row.size() != 8) ||
                 (schema_columns != 0 && row.size() != schema_columns)) {
                 throw std::runtime_error("expected consistent 6-column or 8-column CSV");

@@ -4,3 +4,4 @@ skip_total_update_on_cancel,KILLED,KILLED
 reset_priority_on_equal_quantity,KILLED,KILLED
 strict_buy_crossing,KILLED,KILLED
 strict_sell_crossing,KILLED,KILLED
+modify_skips_matching,KILLED,KILLED
