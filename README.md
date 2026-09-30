@@ -1,6 +1,6 @@
 # C++ Limit Order Book and Matching Engine
 
-A small, reproducible market-infrastructure project for learning how ordered market events update a limit order book. Version 0.7 adds a unified engine contract, marketable replacements, strict CSV validation, and differential stateful testing against an independent reference model.
+A small, reproducible market-infrastructure project for learning how ordered market events update a limit order book. Version 0.8 adds **differential testing**: every randomized event stream is run through the real `OrderBook` and a deliberately naive reference implementation, and every observable output—result code, each trade field, resting quantity, and full FIFO depth—must match after every event. See [Differential testing](#differential-testing-v08). Version 0.7 introduced the unified engine contract and fixed marketable-`MODIFY` and strict CSV parsing bugs; see [v0.7 correctness fixes](#v07-correctness-fixes).
 
 This is an educational systems project—not a production exchange gateway, trading strategy, alpha model, or implementation of CME iLink.
 
@@ -84,6 +84,8 @@ ctest --test-dir build --output-on-failure
 ./build/order_book_benchmark 500000 matching
 ./build/order_book_telemetry performance_telemetry.csv 120 20000 60 50
 ./build/order_book_property_fuzz 1 10000 fuzz_failure.txt
+./build/order_book_differential 1 20000 differential_failure.csv
+./build/order_book_differential --replay tests/corpus/v0_6_marketable_modify.csv
 python3 analysis/performance_regression.py performance_telemetry.csv
 python3 analysis/mutation_experiment.py
 ```
@@ -238,25 +240,87 @@ audits properties broader than individual examples:
 
 The seed makes a generated run reproducible. If a property fails, the runner removes chunks of operations while preserving the failure category and writes the reduced sequence, seed, failing step, and reason to the requested file. This is deterministic differential random testing rather than coverage-guided fuzzing such as libFuzzer or AFL++.
 
+## Differential testing (v0.8)
+
+**Question:** does the optimized book produce exactly the same observable behaviour as an implementation simple enough to verify by reading?
+
+`tests/differential_reference_book.hpp` keeps every resting order in one flat vector with an insertion sequence number. Price-time priority is literally "best price, then smallest sequence number", found by linear scan; modification is "shrink in place if same price and not larger, otherwise remove and resubmit". It shares data types with `OrderBook` but none of its logic (no `map`, `list`, iterators, or per-level totals).
+
+`tests/order_book_differential.cpp` drives both books with the same event stream and compares, after **every** event:
+
+- `accepted` and `resting_quantity`;
+- every trade: ID, aggressor, resting order, price, quantity, timestamp;
+- both sides' full depth: level prices, level totals, and every order's ID and quantity in FIFO order;
+- order count, plus `OrderBook::validate_invariants()`.
+
+The generator tracks state with the **reference** book, so the implementation under test no longer decides which events get generated (in the property fuzzer, the generator's model is `OrderBook` itself). About 20% of generated events are deliberately invalid—duplicate IDs, zero quantities, non-positive prices, unknown IDs, over-executions—so rejection paths are compared too. A narrow 21-tick price band keeps the book crossing often. A passing run prints what it exercised, for example:
+
+```text
+differential_passed seed=7 steps=20000
+  ADD=8238/757(ok/rej) CANCEL=2732/571(ok/rej) MODIFY=3926/586(ok/rej) EXECUTE=2356/834(ok/rej)
+  trades=5020 multi_trade_events=1189 crossing_modifies=474 max_resting_orders=26
+```
+
+On a mismatch the stream is minimized and saved as a replay CSV that `--replay` and `order_book_replay` both accept. Saved reproducers go in `tests/corpus/`, and CMake registers every file there as a test, so a fixed bug stays fixed.
+
+**What it found on its first run.** v0.7 made `process()` return `resting_quantity` for `EXECUTE`, but it returned the order's remaining quantity even when the execution was *rejected*; every other rejected operation returns 0. Minimized reproducer (`tests/corpus/v0_7_rejected_execute_resting_qty.csv`):
+
+```text
+1,ADD,2157,SELL,9991,24
+2,EXECUTE,2157,SELL,9991,28     # rejected over-execution: reported 24, reference 0
+```
+
+No existing test inspected that field on a rejected execution. It is minor, but it was a real API inconsistency, and it was found in the first seconds of the first run.
+
+Verification for this release: 200 release seeds × 20,000 events and 30 ASan/UBSan seeds × 5,000 events with no mismatches, plus the corpus replayed under sanitizers.
+
+**Limits.** Agreement with the reference is only evidence of correctness if the reference is right; it is kept small enough to review line by line, and `OrderBook` is independently checked by the unit tests and invariants, so a shared mistake would have to slip past all three. The generator keeps books shallow (tens of orders) to force frequent crossing; it does not test deep-book or large-ID behaviour.
+
 ### Mutation experiment
 
-`analysis/mutation_experiment.py` creates temporary source copies, injects six controlled faults, and runs both unit-test binaries and up to five fixed-seed property-fuzz runs (stopping after the first kill). Compilation failures abort the experiment instead of being counted as killed mutants. Mutated source files are deleted with the temporary directory and never replace production code.
+`analysis/mutation_experiment.py` creates temporary source copies, injects one controlled fault at a time, and runs the unit suite plus five fixed seeds each of the property fuzzer and the differential fuzzer. Mutated source files are deleted with the temporary directory and never replace production code.
 
-The following table records the **historical v0.6 experiment**, before the v0.7
-contract tests and independent reference model. Current rerun results are stored in
-[mutation_results.csv](docs/testing/mutation_results.csv). In the v0.7 rerun, both
-the combined unit suites and differential fuzzer killed all five selected mutants;
-this is still not a general detection-rate estimate.
+| Controlled mutant | Unit tests | Property fuzzer | Differential |
+|---|---|---|---|
+| Skip level-total update during execution | Killed | Killed | Killed |
+| Skip level-total update during cancellation | Killed | Killed | Killed |
+| Reset FIFO priority for an equal-quantity modification | Killed | Killed | Killed |
+| Require strict inequality for a crossing buy | Killed | Killed | Killed |
+| Require strict inequality for a crossing sell | Killed | Killed | Killed |
+| Marketable modify rests without matching (the v0.6 bug) | Killed | Killed | Killed |
+| Trade printed at the incoming price, not the resting price | Killed | Killed | Killed |
+| Trade ID never increments | Killed | Killed | Killed |
+| Trade timestamp dropped | Killed | Killed | Killed |
+| Quantity increase keeps FIFO priority | Killed | **Survived** | Killed |
+| **Total killed** | 10/10 | 9/10 | 10/10 |
 
-| Controlled mutant | Unit tests | Property fuzzer |
-|---|---|---|
-| Skip level-total update during execution | Survived | Killed |
-| Skip level-total update during cancellation | Survived | Killed |
-| Reset FIFO priority for an equal-quantity modification | Survived | Killed |
-| Require strict inequality for a crossing buy | Killed | Killed |
-| Require strict inequality for a crossing sell | Survived | Killed |
+Read this carefully: the mutants are few and hand-written, so the totals are not a general detection-rate estimate. The current unit suite and differential harness killed all ten selected mutants. The property fuzzer missed the deliberately injected FIFO-priority bug for quantity increases under these five seeds, while the differential comparison caught it. The useful conclusion is structural: each method exercises a different oracle, and agreement across example tests, properties, invariants, and a reference implementation is stronger evidence than any one method alone.
 
-In that v0.6 run, for this deliberately selected mutant set, unit tests killed 1/5 and the property fuzzer killed 5/5. This does not establish a general detection rate: the mutants are few, hand-written, and related to the encoded properties. It demonstrates that invariant-driven random sequences cover interactions absent from the current example-based tests.
+## v0.7 correctness fixes
+
+Two bugs were confirmed in v0.6 and are now covered by regression tests in `tests/order_book_tests.cpp`.
+
+**1. A marketable `MODIFY` left a crossed book.** With `BUY 1 @ 100` and `SELL 2 @ 105` resting, `MODIFY 1 -> BUY @ 110` rested the bid above the ask (spread `-0.05`) with no trade, and `validate_invariants()` reported `crossed resting book`. The fix routes every priority-resetting modification through `submit()`, so it matches exactly like a new order before any remainder rests. `modify()` and `process()` return `EngineResult`, which carries stable result codes and trades.
+
+**2. Negative CSV quantities were accepted.** `std::stoull("-5")` returns `2^64 - 5`, so a row with quantity `-5` created an order for 18,446,744,073,709,551,611 shares. The reader now uses `std::from_chars`, requires the whole field to be consumed, and reports overflow.
+
+**Why the fuzzer missed bug 1.** The v0.6 generator clamped modify prices to the passive side of the spread (`min(price, best_ask - 1)` for bids), so the crossing path was never exercised. v0.7 draws modify prices from the full band and adds modify-specific properties: quantity conservation, the modified order as aggressor, "a marketable modify must trade", and "a fully filled modify leaves no order". Reintroducing the bug as a mutant shows the difference:
+
+| Fuzzer | Seeds 1, 7, 42, 2026, 20260831 × 5,000 steps |
+|---|---|
+| v0.6 (clamped) | all pass — bug not detected |
+| v0.7 (full band) | fails at step 28 of seed 1; minimized to 3 operations |
+
+```text
+# reason=marketable modify did not trade
+SUBMIT,2299,BUY,10009,91
+SUBMIT,2302,SELL,10020,25
+MODIFY,2302,SELL,10005,64
+```
+
+The lesson is that a random-testing harness is only as good as its input distribution: a constraint added to keep generated states "valid" silently removed the interesting ones.
+
+Verification for v0.7 included unit and property tests under ASan/UBSan, fixed-seed release runs, and the mutation experiment.
 
 ## Priority rules
 
@@ -278,12 +342,6 @@ In that v0.6 run, for this deliberately selected mutant set, unit tests killed 1
 
 ## Next engineering experiments
 
-The next milestone is a single-threaded, length-prefixed TCP replay service with
-codec / fragmented-frame / slow-client tests, followed by end-to-end latency
-measurements. See the [post-v0.6 roadmap](docs/roadmap.md). Further test and performance experiments:
-
-1. Add coverage-guided fuzzing and compare reached branches with the fixed-seed generator.
-2. Expand mutation operators and repeat the comparison on an independently chosen mutant set.
-3. Repeat each regression scenario across processes and report uncertainty across runs.
-4. Use a system profiler to identify allocation and container hot spots after an alarm.
-5. Test networked replay while separating transport, parsing, and book-processing cost.
+1. ~~**v0.8 — differential testing.**~~ Done; see [Differential testing](#differential-testing-v08).
+2. **v0.9 — event log, snapshots, deterministic replay.** Sequenced input/output log; periodic snapshots; recovery from snapshot + log tail must reproduce the same state hash and trade stream as a full replay.
+3. **v1.0 — networked replay and profiling.** Add a length-prefixed TCP replay service, separate transport/parsing/matching costs, then make one profiling-driven optimization guarded by the differential tests.

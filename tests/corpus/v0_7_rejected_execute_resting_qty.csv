@@ -1,0 +1,3 @@
+timestamp_ns,event_type,order_id,side,price_ticks,quantity
+1,ADD,2157,SELL,9991,24
+2,EXECUTE,2157,SELL,9991,28

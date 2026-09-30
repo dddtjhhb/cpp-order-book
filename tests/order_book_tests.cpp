@@ -235,6 +235,19 @@ int main() {
     check(replay_modify.trades.size() == 1, "process() reports trades from MODIFY");
     check(!replay_cross.validate_invariants().has_value(), "replayed modify keeps invariants");
 
+    // Regression (v0.7, found by the differential fuzzer): a rejected EXECUTE
+    // reported the order's remaining quantity instead of 0.
+    lob::OrderBook rejected_execute;
+    rejected_execute.process({1, lob::EventType::Add, order(2157, lob::Side::Sell, 9991, 24)});
+    const auto over_execute = rejected_execute.process(
+        {2, lob::EventType::Execute, order(2157, lob::Side::Sell, 9991, 28)});
+    check(!over_execute.accepted, "over-execution rejected through process()");
+    check(over_execute.resting_quantity == 0, "rejected execution reports zero resting quantity");
+    const auto partial_execute = rejected_execute.process(
+        {3, lob::EventType::Execute, order(2157, lob::Side::Sell, 9991, 4)});
+    check(partial_execute.accepted && partial_execute.resting_quantity == 20,
+          "accepted execution reports remaining quantity");
+
     // Regression (v0.6): std::stoull wrapped "-5" to 2^64 - 5 and the order was
     // accepted with 18446744073709551611 shares.
     check(csv_rejects("1,ADD,1,BUY,100,-5\n"), "CSV rejects negative quantity");
@@ -257,6 +270,21 @@ int main() {
           "CSV accepts CRLF line endings");
     check(crlf_events[0].order.price == -3,
           "CSV parses signed price; the book, not the parser, rejects it");
+
+    lob::OrderBook depth_book;
+    depth_book.submit(order(1, lob::Side::Buy, 100, 5), 0);
+    depth_book.submit(order(2, lob::Side::Buy, 101, 3), 0);
+    depth_book.submit(order(3, lob::Side::Buy, 101, 4), 0);
+    depth_book.submit(order(4, lob::Side::Sell, 105, 2), 0);
+    const auto bids = depth_book.depth(lob::Side::Buy);
+    check(bids.size() == 2 && bids[0].price == 101 && bids[1].price == 100,
+          "bid depth is best price first");
+    check(bids[0].total_quantity == 7 && bids[0].orders.size() == 2 &&
+              bids[0].orders[0].id == 2 && bids[0].orders[1].id == 3,
+          "depth level lists orders in FIFO order with total");
+    const auto asks = depth_book.depth(lob::Side::Sell);
+    check(asks.size() == 1 && asks[0].price == 105 && asks[0].total_quantity == 2,
+          "ask depth is reported");
 
     if (failures == 0) {
         std::cout << "All order-book tests passed.\n";
