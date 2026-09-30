@@ -143,6 +143,24 @@ engine where that command requires positive values.
 
 For `CANCEL`, only `order_id` determines which stored order is removed. For `EXECUTE`, `order_id` and `quantity` are used. The remaining columns keep the schema uniform.
 
+## Engine benchmark (deep book, mixed workload)
+
+```bash
+scripts/run_engine_benchmark.sh   # Release build, ~30 s, writes docs/benchmarks/<date>-<os>-<arch>.md
+```
+
+The benchmark pre-fills 5,000 orders per side over 500 levels, then replays
+1,000,000 requests. The mix is passive adds, cancels, modifies and aggressive
+orders that sweep one or more levels, with about 176k trades. It reports:
+
+- median, min and max throughput across 7 runs;
+- p50, p90, p99 and p99.9 latency for each operation type;
+- the machine, compiler and commit that produced the numbers.
+
+Method, caveats and recorded runs are in
+[docs/benchmarks/](docs/benchmarks/README.md). Quote numbers from there, not from
+the older benchmark below, which measures a nearly empty book.
+
 ## Benchmark methodology
 
 The benchmark supports two deterministic in-memory workloads:
