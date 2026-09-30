@@ -24,6 +24,12 @@ target_link_libraries(order_book_benchmark PRIVATE order_book)
 add_executable(order_book_telemetry benchmarks/performance_telemetry.cpp)
 target_link_libraries(order_book_telemetry PRIVATE order_book)
 
+add_executable(order_book_engine_benchmark benchmarks/engine_benchmark.cpp)
+target_link_libraries(order_book_engine_benchmark PRIVATE order_book)
+string(TOUPPER "${CMAKE_BUILD_TYPE}" LOB_BUILD_TYPE_UPPER)
+target_compile_definitions(order_book_engine_benchmark PRIVATE
+    LOB_BENCH_BUILD_FLAGS="${CMAKE_BUILD_TYPE} ${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${LOB_BUILD_TYPE_UPPER}}")
+
 add_executable(order_book_property_fuzz tests/order_book_property_fuzz.cpp)
 target_link_libraries(order_book_property_fuzz PRIVATE order_book)
 
@@ -41,6 +47,8 @@ set_tests_properties(replay_marketable_modify PROPERTIES
 add_test(NAME benchmark_lifecycle_smoke COMMAND order_book_benchmark 100 lifecycle)
 add_test(NAME benchmark_matching_smoke COMMAND order_book_benchmark 100 matching)
 add_test(NAME telemetry_smoke COMMAND order_book_telemetry telemetry_smoke.csv 4 100 2 50)
+add_test(NAME engine_benchmark_smoke COMMAND order_book_engine_benchmark
+    --events 20000 --depth 200 --levels 50 --runs 1 --latency-runs 1)
 add_test(NAME property_fuzz_seed_1 COMMAND order_book_property_fuzz 1 2000 fuzz_failure_seed_1.txt)
 add_test(NAME property_fuzz_seed_42 COMMAND order_book_property_fuzz 42 2000 fuzz_failure_seed_42.txt)
 add_test(NAME differential_seed_1 COMMAND order_book_differential 1 5000 differential_failure_seed_1.csv)
