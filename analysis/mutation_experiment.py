@@ -49,9 +49,9 @@ MUTANTS = [
     # Reintroduces the v0.6 bug: a marketable MODIFY rests without matching.
     Mutant(
         "modify_skips_matching",
-        "auto result = submit(Order{id, old.side, new_price, new_quantity}, timestamp_ns);",
-        "auto result = SubmitResult{add(Order{id, old.side, new_price, new_quantity}).accepted,"
-        " \"\", {}, new_quantity};",
+        "return submit(replacement, timestamp_ns);",
+        "add_resting(replacement);\n"
+        "    return result(ResultCode::Accepted, \"mutant: rested without matching\", {}, new_quantity);",
     ),
 ]
 
@@ -82,19 +82,25 @@ def main() -> None:
             mutated_source = temp / f"{mutant.name}.cpp"
             mutated_source.write_text(original.replace(mutant.old, mutant.new), encoding="utf-8")
 
-            unit_binary = temp / f"{mutant.name}_unit"
-            unit_compiled = compile_test(
-                ROOT / "tests/order_book_tests.cpp",
-                mutated_source,
-                unit_binary,
-                [ROOT / "src/csv_reader.cpp"],
-            )
-            unit_survived = unit_compiled and run([str(unit_binary)], temp)
+            unit_survived = True
+            for source_name in ("order_book_tests.cpp", "engine_contract_tests.cpp"):
+                unit_binary = temp / f"{mutant.name}_{source_name}.unit"
+                unit_compiled = compile_test(
+                    ROOT / "tests" / source_name,
+                    mutated_source,
+                    unit_binary,
+                    [ROOT / "src/csv_reader.cpp"],
+                )
+                if not unit_compiled:
+                    raise RuntimeError(f"{mutant.name}: {source_name} did not compile")
+                unit_survived = run([str(unit_binary)], temp) and unit_survived
 
             fuzz_binary = temp / f"{mutant.name}_fuzz"
             fuzz_compiled = compile_test(
                 ROOT / "tests/order_book_property_fuzz.cpp", mutated_source, fuzz_binary, []
             )
+            if not fuzz_compiled:
+                raise RuntimeError(f"{mutant.name}: property fuzzer did not compile")
             fuzz_survived = fuzz_compiled
             if fuzz_compiled:
                 for seed in (1, 7, 42, 2026, 20260831):

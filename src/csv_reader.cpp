@@ -4,14 +4,9 @@
 #include <fstream>
 #include <stdexcept>
 #include <string_view>
-#include <type_traits>
 
 namespace lob {
 namespace {
-
-constexpr std::size_t kColumnCount = 6;
-constexpr std::string_view kColumnNames[kColumnCount] = {
-    "timestamp_ns", "event_type", "order_id", "side", "price_ticks", "quantity"};
 
 Side parse_side(std::string_view text) {
     if (text == "BUY") return Side::Buy;
@@ -27,41 +22,25 @@ EventType parse_type(std::string_view text) {
     throw std::runtime_error("invalid event type: " + std::string(text));
 }
 
-// Parses the entire field as a base-10 integer. Unlike std::stoull, this
-// rejects a leading '-' for unsigned types (stoull silently wraps "-5" to
-// 2^64 - 5), leading whitespace or '+', trailing garbage, and out-of-range values.
 template <typename Integer>
-Integer parse_integer(std::string_view text, std::string_view column) {
-    static_assert(std::is_integral_v<Integer>);
+Integer parse_integer(const std::string& text) {
     Integer value{};
-    const char* const first = text.data();
-    const char* const last = text.data() + text.size();
-    const auto [end, error] = std::from_chars(first, last, value);
-    if (text.empty() || error == std::errc::invalid_argument || end != last) {
-        throw std::runtime_error("invalid integer in " + std::string(column) + ": '" +
-                                 std::string(text) + "'");
-    }
-    if (error == std::errc::result_out_of_range) {
-        throw std::runtime_error("out-of-range integer in " + std::string(column) + ": '" +
-                                 std::string(text) + "'");
+    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (text.empty() || parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size()) {
+        throw std::runtime_error("invalid or out-of-range integer: " + text);
     }
     return value;
 }
 
-// Splits a row into exactly kColumnCount fields; any other count is an error.
-bool split_fields(std::string_view line, std::string_view (&fields)[kColumnCount]) {
-    std::size_t index = 0;
+std::vector<std::string> fields(const std::string& line) {
+    std::vector<std::string> result;
     std::size_t start = 0;
-    while (true) {
-        const auto comma = line.find(',', start);
-        if (index == kColumnCount) return false;  // too many columns
-        fields[index++] = line.substr(start, comma == std::string_view::npos
-                                                 ? std::string_view::npos
-                                                 : comma - start);
-        if (comma == std::string_view::npos) break;
-        start = comma + 1;
+    for (;;) {
+        const auto end = line.find(',', start);
+        result.push_back(line.substr(start, end == std::string::npos ? end : end - start));
+        if (end == std::string::npos) return result;
+        start = end + 1;
     }
-    return index == kColumnCount;
 }
 
 }  // namespace
@@ -70,42 +49,44 @@ std::vector<Event> read_events(std::istream& input) {
     std::vector<Event> events;
     std::string raw_line;
     std::size_t line_number = 0;
+    std::size_t schema_columns = 0;
+    constexpr std::string_view legacy_header =
+        "timestamp_ns,event_type,order_id,side,price_ticks,quantity";
+    const std::string extended_header = std::string(legacy_header) + ",symbol_id,sequence";
 
     while (std::getline(input, raw_line)) {
         ++line_number;
-        std::string_view line(raw_line);
-        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);  // CRLF files
-        if (line.empty() || (line_number == 1 && line.rfind("timestamp", 0) == 0)) {
+        if (!raw_line.empty() && raw_line.back() == '\r') raw_line.pop_back();
+        if (raw_line.empty()) continue;
+        if (line_number == 1 && (raw_line == legacy_header || raw_line == extended_header)) {
+            schema_columns = raw_line == legacy_header ? 6 : 8;
             continue;
         }
-
-        std::string_view fields[kColumnCount];
-        if (!split_fields(line, fields)) {
-            throw std::runtime_error("CSV line " + std::to_string(line_number) +
-                                     ": expected exactly " + std::to_string(kColumnCount) +
-                                     " columns");
-        }
-
         try {
+            const auto row = fields(raw_line);
+            if ((row.size() != 6 && row.size() != 8) ||
+                (schema_columns != 0 && row.size() != schema_columns)) {
+                throw std::runtime_error("expected consistent 6-column or 8-column CSV");
+            }
+            schema_columns = row.size();
             events.push_back(Event{
-                parse_integer<std::uint64_t>(fields[0], kColumnNames[0]),
-                parse_type(fields[1]),
-                Order{parse_integer<OrderId>(fields[2], kColumnNames[2]),
-                      parse_side(fields[3]),
-                      parse_integer<Price>(fields[4], kColumnNames[4]),
-                      parse_integer<Quantity>(fields[5], kColumnNames[5])}});
+                parse_integer<std::uint64_t>(row[0]), parse_type(row[1]),
+                Order{parse_integer<OrderId>(row[2]), parse_side(row[3]),
+                      parse_integer<Price>(row[4]), parse_integer<Quantity>(row[5])},
+                row.size() == 8 ? parse_integer<SymbolId>(row[6]) : SymbolId{1},
+                row.size() == 8 ? parse_integer<RequestSequence>(row[7])
+                                : static_cast<RequestSequence>(events.size() + 1)});
         } catch (const std::exception& error) {
             throw std::runtime_error("CSV line " + std::to_string(line_number) + ": " + error.what());
         }
     }
+    if (input.bad()) throw std::runtime_error("failed while reading CSV");
     return events;
 }
 
 std::vector<Event> read_events_file(const std::string& path) {
     std::ifstream input(path);
-    if (!input) {
-        throw std::runtime_error("could not open input file: " + path);
-    }
+    if (!input) throw std::runtime_error("could not open input file: " + path);
     return read_events(input);
 }
 

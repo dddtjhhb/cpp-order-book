@@ -15,6 +15,9 @@ target_link_libraries(order_book_replay PRIVATE order_book)
 add_executable(order_book_tests tests/order_book_tests.cpp)
 target_link_libraries(order_book_tests PRIVATE order_book)
 
+add_executable(engine_contract_tests tests/engine_contract_tests.cpp)
+target_link_libraries(engine_contract_tests PRIVATE order_book)
+
 add_executable(order_book_benchmark benchmarks/replay_benchmark.cpp)
 target_link_libraries(order_book_benchmark PRIVATE order_book)
 
@@ -26,6 +29,11 @@ target_link_libraries(order_book_property_fuzz PRIVATE order_book)
 
 enable_testing()
 add_test(NAME order_book_tests COMMAND order_book_tests)
+add_test(NAME engine_contract_tests COMMAND engine_contract_tests)
+add_test(NAME replay_marketable_modify
+    COMMAND order_book_replay ${CMAKE_CURRENT_SOURCE_DIR}/data/marketable_modify.csv)
+set_tests_properties(replay_marketable_modify PROPERTIES
+    PASS_REGULAR_EXPRESSION "events=5 rejected=0 trades=2 traded_quantity=7 active_orders=0")
 add_test(NAME benchmark_lifecycle_smoke COMMAND order_book_benchmark 100 lifecycle)
 add_test(NAME benchmark_matching_smoke COMMAND order_book_benchmark 100 matching)
 add_test(NAME telemetry_smoke COMMAND order_book_telemetry telemetry_smoke.csv 4 100 2 50)

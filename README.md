@@ -1,6 +1,6 @@
 # C++ Limit Order Book and Matching Engine
 
-A small, reproducible market-infrastructure project for learning how ordered market events update a limit order book. Version 0.7 is a correctness release: marketable modifications now match instead of leaving a crossed book, the CSV reader rejects malformed numbers instead of silently wrapping them, and the property fuzzer no longer avoids the input region that hid the modify bug. See [v0.7 correctness fixes](#v07-correctness-fixes).
+A small, reproducible market-infrastructure project for learning how ordered market events update a limit order book. Version 0.7 adds a unified engine contract, marketable replacements, strict CSV validation, and differential stateful testing against an independent reference model.
 
 This is an educational systems project—not a production exchange gateway, trading strategy, alpha model, or implementation of CME iLink.
 
@@ -21,7 +21,7 @@ Prices are stored as integer ticks: `10025` represents `$100.25` when one tick i
 CSV events
     |
     v
-CSV reader -> Event -> OrderBook -> top of book / validation result
+CSV reader -> Event -> OrderBook -> EngineResult / top of book
                             |
                             v
                     matching engine
@@ -46,19 +46,40 @@ The book uses:
 - Trades use the resting order's price.
 - One incoming order may sweep multiple price levels.
 - Any unfilled remainder becomes a resting order at the back of its price-level queue.
-- A price change or quantity increase is a cancel/replace: the replacement goes through the same matching path as a new order, so a modification that crosses the spread trades immediately (the modified order is the aggressor).
 
 Each trade records a trade ID, incoming and resting order IDs, execution price, quantity, and timestamp.
 
+## Stable engine contract (v0.7)
+
+All commands use `process(Event)` and return `EngineResult`: acceptance, a stable
+`ResultCode`, remaining quantity, zero or more ordered trades, and echoed symbol /
+request sequence. Marketable modifications now match immediately at resting prices;
+same-price quantity reductions and unchanged quantities preserve FIFO priority.
+
+See [the engine contract](docs/engine-contract.md) for the input/output tables,
+validation order, state transitions, ID/sequence semantics and failure model.
+`ProcessResult` and `SubmitResult` have been replaced by `EngineResult`; the public
+resting-only `add` helper has been removed in favor of `submit` or `process(Add)`.
+
+```cpp
+lob::OrderBook book(1);
+const auto result = book.process({1000, lob::EventType::Add,
+    {42, lob::Side::Buy, 10025, 10}, 1, 7});
+// result.symbol_id == 1, result.sequence == 7
+// Inspect result.code and result.trades; do not parse result.message.
+```
+
 ## Build and test with CMake
 
-Requires a C++17 compiler and CMake 3.16+.
+Requires a C++17 compiler and CMake 3.16+. Without CMake, use `make -j4 all test`
+(the test target also requires Python 3), or the direct compiler commands below.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build --output-on-failure
 ./build/order_book_replay data/sample_events.csv
+./build/order_book_replay data/marketable_modify.csv
 ./build/order_book_benchmark 500000 lifecycle
 ./build/order_book_benchmark 500000 matching
 ./build/order_book_telemetry performance_telemetry.csv 120 20000 60 50
@@ -78,6 +99,9 @@ c++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Iinclude \
   src/order_book.cpp src/csv_reader.cpp tests/order_book_tests.cpp \
   -o build/order_book_tests
 c++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Iinclude \
+  src/order_book.cpp src/csv_reader.cpp tests/engine_contract_tests.cpp \
+  -o build/engine_contract_tests
+c++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Iinclude \
   src/order_book.cpp benchmarks/replay_benchmark.cpp \
   -o build/order_book_benchmark
 c++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Iinclude \
@@ -88,7 +112,9 @@ c++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Iinclude \
   -o build/order_book_property_fuzz
 
 ./build/order_book_tests
+./build/engine_contract_tests
 ./build/order_book_replay data/sample_events.csv
+./build/order_book_replay data/marketable_modify.csv
 ./build/order_book_benchmark 500000 lifecycle
 ./build/order_book_benchmark 500000 matching
 ./build/order_book_telemetry performance_telemetry.csv 120 20000 60 50
@@ -105,11 +131,17 @@ timestamp_ns,event_type,order_id,side,price_ticks,quantity
 1040,CANCEL,1,BUY,10025,5
 ```
 
+The legacy six-column schema uses symbol 1 and assigns request sequences 1, 2, ...
+in data-row order. An optional eight-column schema appends `symbol_id,sequence`;
+see [the marketable-modify example](data/marketable_modify.csv). The CLI runs symbol 1.
+A file must use one consistent schema; headers, when supplied, must match exactly.
+CRLF is supported. Numeric fields must be complete decimal integers in range;
+unsigned fields reject negative values, and extra columns, empty numbers, whitespace
+and numeric suffixes are rejected with a line number. Quoted CSV fields are unsupported.
+Zero quantity / nonpositive price are parsed when representable and rejected by the
+engine where that command requires positive values.
+
 For `CANCEL`, only `order_id` determines which stored order is removed. For `EXECUTE`, `order_id` and `quantity` are used. The remaining columns keep the schema uniform.
-
-`EXECUTE` is an externally reported fill against a resting order (market-data replay semantics). Trades produced by the engine's own matching come from `ADD` and `MODIFY`; they are returned by `OrderBook::process()` and counted by the replay CLI.
-
-Parsing is strict: every row must have exactly six columns; integer fields must be plain base-10 digits with no whitespace, `+`, or trailing characters; `timestamp_ns`, `order_id`, and `quantity` must be non-negative and fit in 64 bits. Violations raise an error naming the line and column. Windows (CRLF) line endings are accepted. `price_ticks` is signed so that the book—not the parser—owns the rule that prices must be positive. The replay CLI exits non-zero if the final book fails `validate_invariants()`.
 
 ## Benchmark methodology
 
@@ -121,6 +153,11 @@ The benchmark supports two deterministic in-memory workloads:
 It runs each workload twice on fresh books. The first pass measures batch throughput without a clock read around every event. The second, instrumented pass records per-event p50, p95, p99, and maximum latency. Keeping the passes separate prevents per-event timing overhead from contaminating the throughput number.
 
 Build in Release mode before reporting results. Latencies include the overhead and resolution limits of `std::chrono::steady_clock`, so they are useful for controlled comparisons on the same machine—not claims about exchange-grade production latency. Numbers depend on hardware, compiler, optimization flags, workload, system load, and measurement scope.
+
+Both current workloads return the book to empty after each pair, with at most one
+resting order. They measure minimal operation paths, not populated-book depth,
+long FIFO queues or realistic multi-order sweeps. Historical v0.4/v0.5 figures below
+have not been rerun for the v0.7 result contract and must not be treated as v0.7 results.
 
 The benchmark intentionally excludes event generation and CSV parsing from its timed passes to isolate order-book update and matching cost. The CLI measurement includes replay processing after parsing, but not file loading.
 
@@ -178,7 +215,12 @@ The 25% workload shift was not a measurable slowdown in this run, so neither det
 
 **Research question:** can stateful invariant checking detect interaction bugs that the existing example-based unit tests miss?
 
-The stateful property fuzzer generates reproducible sequences of submit, cancel, modify, and execute operations from a fixed seed. After every operation it audits properties that are broader than individual examples:
+The stateful property fuzzer generates reproducible sequences of submit, cancel,
+modify and execute operations from a fixed seed, including crossing replacements and
+rejected commands. Every operation is submitted through `process` and compared with
+an independent reference book implemented as an arrival-ordered vector with linear
+scans. Comparisons cover every trade and the complete live-order/FIFO state. It also
+audits properties broader than individual examples:
 
 - every indexed order appears exactly once in a FIFO queue;
 - each stored iterator, side, and price agrees with its price level;
@@ -186,7 +228,7 @@ The stateful property fuzzer generates reproducible sequences of submit, cancel,
 - empty levels and zero-quantity resting orders cannot remain;
 - automatic matching cannot leave a crossed resting book;
 - submitted quantity equals traded quantity plus resting quantity;
-- the first trade respects best-price and FIFO priority;
+- every trade respects best-price and FIFO priority, quantity and resting price;
 - same-price quantity reductions preserve priority, while increases or price changes move an order to the FIFO back.
 
 ```bash
@@ -194,11 +236,17 @@ The stateful property fuzzer generates reproducible sequences of submit, cancel,
 ./build/order_book_property_fuzz 42 10000 fuzz_failure.txt
 ```
 
-The seed makes a generated run reproducible. If a property fails, the runner removes chunks of operations while preserving the failure and writes the reduced sequence, seed, failing step, and reason to the requested file. This is deterministic model-based random testing rather than coverage-guided fuzzing such as libFuzzer or AFL++.
+The seed makes a generated run reproducible. If a property fails, the runner removes chunks of operations while preserving the failure category and writes the reduced sequence, seed, failing step, and reason to the requested file. This is deterministic differential random testing rather than coverage-guided fuzzing such as libFuzzer or AFL++.
 
 ### Mutation experiment
 
-`analysis/mutation_experiment.py` creates temporary source copies, injects five controlled faults, and runs both the original unit suite and five fixed-seed property-fuzz runs. Mutated source files are deleted with the temporary directory and never replace production code.
+`analysis/mutation_experiment.py` creates temporary source copies, injects six controlled faults, and runs both unit-test binaries and up to five fixed-seed property-fuzz runs (stopping after the first kill). Compilation failures abort the experiment instead of being counted as killed mutants. Mutated source files are deleted with the temporary directory and never replace production code.
+
+The following table records the **historical v0.6 experiment**, before the v0.7
+contract tests and independent reference model. Current rerun results are stored in
+[mutation_results.csv](docs/testing/mutation_results.csv). In the v0.7 rerun, both
+the combined unit suites and differential fuzzer killed all five selected mutants;
+this is still not a general detection-rate estimate.
 
 | Controlled mutant | Unit tests | Property fuzzer |
 |---|---|---|
@@ -207,54 +255,35 @@ The seed makes a generated run reproducible. If a property fails, the runner rem
 | Reset FIFO priority for an equal-quantity modification | Survived | Killed |
 | Require strict inequality for a crossing buy | Killed | Killed |
 | Require strict inequality for a crossing sell | Survived | Killed |
-| Marketable modify rests without matching (the v0.6 bug) | Killed | Killed |
 
-For the original five mutants, unit tests killed 1/5 and the property fuzzer killed 5/5. The sixth mutant was added in v0.7 and reintroduces the modify bug; the v0.6 fuzzer does not kill it (see below). This does not establish a general detection rate: the mutants are few, hand-written, and related to the encoded properties. It demonstrates that invariant-driven random sequences cover interactions absent from the current example-based tests.
-
-## v0.7 correctness fixes
-
-Two bugs were confirmed in v0.6 and are now covered by regression tests in `tests/order_book_tests.cpp`.
-
-**1. A marketable `MODIFY` left a crossed book.** With `BUY 1 @ 100` and `SELL 2 @ 105` resting, `MODIFY 1 -> BUY @ 110` rested the bid above the ask (spread `-0.05`) with no trade, and `validate_invariants()` reported `crossed resting book`. The fix routes every priority-resetting modification through `submit()`, so it matches exactly like a new order before any remainder rests. `modify()` and `process()` now return `SubmitResult`, which carries the trades.
-
-**2. Negative CSV quantities were accepted.** `std::stoull("-5")` returns `2^64 - 5`, so a row with quantity `-5` created an order for 18,446,744,073,709,551,611 shares. The reader now uses `std::from_chars`, requires the whole field to be consumed, and reports overflow.
-
-**Why the fuzzer missed bug 1.** The v0.6 generator clamped modify prices to the passive side of the spread (`min(price, best_ask - 1)` for bids), so the crossing path was never exercised. v0.7 draws modify prices from the full band and adds modify-specific properties: quantity conservation, the modified order as aggressor, "a marketable modify must trade", and "a fully filled modify leaves no order". Reintroducing the bug as a mutant shows the difference:
-
-| Fuzzer | Seeds 1, 7, 42, 2026, 20260831 × 5,000 steps |
-|---|---|
-| v0.6 (clamped) | all pass — bug not detected |
-| v0.7 (full band) | fails at step 28 of seed 1; minimized to 3 operations |
-
-```text
-# reason=marketable modify did not trade
-SUBMIT,2299,BUY,10009,91
-SUBMIT,2302,SELL,10020,25
-MODIFY,2302,SELL,10005,64
-```
-
-The lesson is that a random-testing harness is only as good as its input distribution: a constraint added to keep generated states "valid" silently removed the interesting ones.
-
-Verification for this release: unit and property tests under ASan/UBSan, 40 sanitized seeds × 5,000 steps, 100 release seeds × 20,000 steps, and the mutation experiment. Replay throughput is unchanged within run-to-run noise.
+In that v0.6 run, for this deliberately selected mutant set, unit tests killed 1/5 and the property fuzzer killed 5/5. This does not establish a general detection rate: the mutants are few, hand-written, and related to the encoded properties. It demonstrates that invariant-driven random sequences cover interactions absent from the current example-based tests.
 
 ## Priority rules
 
 - New orders join the back of their price level's FIFO queue.
 - A quantity decrease at the same price preserves priority.
-- A quantity increase or price change resets priority, and matches first if the new price is marketable.
+- A quantity increase or price change resets priority and matches immediately if the replacement is marketable.
 - A partial execution reduces remaining quantity without changing priority.
 - A full execution removes the order and deletes an empty price level.
 
 ## Current limitations
 
 - Only limit orders are matched; market orders and time-in-force instructions are not implemented.
+- One configured symbol per book; no session sequencing, deduplication or client report routing.
+- `EXECUTE` is an external replay adjustment and does not synthesize counterparty trades.
 - No fees, exchange-specific protocol rules, persistence, networking, or strategy logic.
 - Events are processed on one thread to preserve deterministic order.
 - The synthetic benchmark is not representative of CME traffic.
 - This code has not been connected to CME iLink, exchange multicast feeds, FPGA hardware, or colocation infrastructure.
 
-## Roadmap
+## Next engineering experiments
 
-1. **v0.8 — differential testing.** A deliberately simple `ReferenceBook` (vector + linear scan) driven in lockstep with `OrderBook`, comparing trade streams, top of book, and per-level quantities after every operation. This replaces the current setup where the generator's model is the implementation under test.
-2. **v0.9 — event log, snapshots, deterministic replay.** Sequenced input/output log; periodic snapshots; recovery from snapshot + log tail must reproduce the same state hash and trade stream as a full replay.
-3. **v1.0 — mixed-workload benchmark and a profiling-driven optimization.** Deep books, realistic ADD/CANCEL/MODIFY/aggressive mix, repeated runs with uncertainty, then one measured change at a time (e.g. allocation-free result types, pooled intrusive order lists), each guarded by the differential tests.
+The next milestone is a single-threaded, length-prefixed TCP replay service with
+codec / fragmented-frame / slow-client tests, followed by end-to-end latency
+measurements. See the [post-v0.6 roadmap](docs/roadmap.md). Further test and performance experiments:
+
+1. Add coverage-guided fuzzing and compare reached branches with the fixed-seed generator.
+2. Expand mutation operators and repeat the comparison on an independently chosen mutant set.
+3. Repeat each regression scenario across processes and report uncertainty across runs.
+4. Use a system profiler to identify allocation and container hot spots after an alarm.
+5. Test networked replay while separating transport, parsing, and book-processing cost.

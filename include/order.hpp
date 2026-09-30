@@ -5,6 +5,8 @@
 
 namespace lob {
 
+using SymbolId = std::uint32_t;
+using RequestSequence = std::uint64_t;
 using OrderId = std::uint64_t;
 using Price = std::int64_t;  // Price in integer ticks (e.g. cents).
 using Quantity = std::uint64_t;
